@@ -63,6 +63,16 @@ namespace Xm5ControlUi
         public string NameFilter { get; private set; }
         public string AssetPath { get; private set; }
 
+        /// <summary>
+        /// True for the WF earbuds, which report a level per earbud plus one for
+        /// the case. The WH headphones answer neither of those inquired types, so
+        /// asking them costs a timeout per refresh for nothing.
+        /// </summary>
+        public bool HasEarbudBatteries
+        {
+            get { return NameFilter.StartsWith("WF", StringComparison.OrdinalIgnoreCase); }
+        }
+
         public DeviceProfile(string displayName, string nameFilter, string assetPath, params string[] aliases)
         {
             DisplayName = displayName;
@@ -277,17 +287,21 @@ namespace Xm5ControlUi
         private const string StateBatchTail = "D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05\" --timeout 1800";
 
         // 66 19 is the WF-1000XM6 noise control state; 66 17 covers older models.
-        // Which one a model answers is a protocol capability rather than anything
-        // the device name can be read for, so both go out until one of them
-        // replies. Only the answering type is asked for after that: an inquired
-        // type a model does not implement is acked and then never answered, so
-        // leaving both in costs a full --timeout on every refresh, forever.
-        private string BuildStateBatchCommand()
+        // Which one a model answers is a protocol capability rather than a form
+        // factor, so unlike the per-earbud battery levels it cannot be inferred
+        // from the device name: both go out until one of them replies. Only the
+        // answering type is asked for after that, because an inquired type a
+        // model does not implement is acked and then never answered, so leaving
+        // both in costs a full --timeout on every refresh, forever.
+        private string BuildStateBatchCommand(DeviceProfile profile)
         {
+            string battery = profile != null && profile.HasEarbudBatteries
+                ? "22 00;22 01;22 02;"
+                : "22 00;";
             string ncasm = ncasmTypeSeen == 0x19 ? "66 19;"
                 : ncasmTypeSeen == 0x17 ? "66 17;"
                 : "66 19;66 17;";
-            return "batch \"22 00;" + ncasm + StateBatchTail;
+            return "batch \"" + battery + ncasm + StateBatchTail;
         }
 
         private readonly string backendPath;
@@ -1944,7 +1958,7 @@ namespace Xm5ControlUi
             var detection = await DetectProfileAsync(false);
             if (IsClosing) return;
             if (detection == null) return;
-            var output = await RunBackendAsync(WithDevice(BuildStateBatchCommand()), "Updating");
+            var output = await RunBackendAsync(WithDevice(BuildStateBatchCommand(detection.Profile ?? currentProfile)), "Updating");
             if (IsClosing) return;
             if (string.IsNullOrWhiteSpace(output)) return;
             if (!output.Contains("Could not open"))
@@ -1959,7 +1973,8 @@ namespace Xm5ControlUi
 
         private async Task RefreshCurrentStateQuietAsync(DeviceDetection detection)
         {
-            var output = await RunBackendQuietAsync(WithDevice(BuildStateBatchCommand()));
+            var output = await RunBackendQuietAsync(WithDevice(BuildStateBatchCommand(
+                detection != null && detection.Profile != null ? detection.Profile : currentProfile)));
             if (IsClosing) return;
             if (string.IsNullOrWhiteSpace(output)) return;
             if (output.Contains("Could not open"))
@@ -1985,8 +2000,24 @@ namespace Xm5ControlUi
 
         private void ParseBattery(string output)
         {
-            var match = Regex.Match(output, @"battery:\s*(.+)");
-            if (match.Success && batteryLabel != null) batteryLabel.Text = FormatBatteryText(match.Groups[1].Value);
+            if (batteryLabel == null) return;
+
+            // Earbuds report the two buds under inquired type 0x01 and the case
+            // under 0x02. Over-ear models answer neither, so fall back to the
+            // single level from type 0x00.
+            var buds = Regex.Match(output, @"(?m)^battery:\s*left\s*(\d+)%.*?right\s*(\d+)%", RegexOptions.IgnoreCase);
+            var cradle = Regex.Match(output, @"(?m)^case battery:\s*(\d+)%", RegexOptions.IgnoreCase);
+
+            if (buds.Success)
+            {
+                string text = "L " + buds.Groups[1].Value + "%   R " + buds.Groups[2].Value + "%";
+                if (cradle.Success) text += "   Case " + cradle.Groups[1].Value + "%";
+                batteryLabel.Text = text;
+                return;
+            }
+
+            var single = Regex.Match(output, @"(?m)^battery:\s*(.+)$");
+            if (single.Success) batteryLabel.Text = FormatBatteryText(single.Groups[1].Value);
         }
 
         private static string FormatBatteryText(string text)

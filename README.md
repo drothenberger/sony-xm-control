@@ -76,6 +76,13 @@ seven, adding the auto ambient toggle and its sensitivity. The backend asks for
 `0x19` first and falls back to `0x17`, and every change is applied as a
 read-modify-write so that setting one field does not clear the others.
 
+Battery is reported per inquired type: `22 00` is a single level, `22 01` is the
+two earbuds, and `22 02` is the case. On the WF-1000XM6 the case level is only
+current while an earbud is docked, and an earbud in the case stops reporting, so
+its level freezes at the last value the connected side saw. Neither the case nor
+the earbuds expose a usable charging state on that model, so the case level is
+reported without one.
+
 Useful when adding support for a new model:
 
 ```text

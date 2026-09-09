@@ -501,7 +501,13 @@ static void print_known_payload(const mdr_frame_t *frame) {
         } else if (n >= 6 && p[1] == 0x01) {
             printf("battery: left %u%% (%s), right %u%% (%s)\n", p[2], charging_text(p[3]), p[4], charging_text(p[5]));
         } else if (n >= 4 && p[1] == 0x02) {
-            printf("case battery: %u%% (%s)\n", p[2], charging_text(p[3]));
+            /*
+             * No charging state here. The WF-1000XM6 reports a constant 0x01 in
+             * p[3] whether or not the case is on power, and the level does not
+             * move while it charges, so both look like values cached from the
+             * last time the buds were docked. Report only the level.
+             */
+            printf("case battery: %u%%\n", p[2]);
         } else {
             printf("battery: ");
             print_hex(p, n);
