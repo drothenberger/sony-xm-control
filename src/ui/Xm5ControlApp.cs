@@ -274,7 +274,21 @@ namespace Xm5ControlUi
         private const int AutoStateRefreshIntervalMs = 15000;
         private const int LiveEqDebounceMs = 260;
         private const int BackendCommandPaceMs = 450;
-        private const string StateBatchCommand = "batch \"22 00;66 17;D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05\" --timeout 1800";
+        private const string StateBatchTail = "D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05\" --timeout 1800";
+
+        // 66 19 is the WF-1000XM6 noise control state; 66 17 covers older models.
+        // Which one a model answers is a protocol capability rather than anything
+        // the device name can be read for, so both go out until one of them
+        // replies. Only the answering type is asked for after that: an inquired
+        // type a model does not implement is acked and then never answered, so
+        // leaving both in costs a full --timeout on every refresh, forever.
+        private string BuildStateBatchCommand()
+        {
+            string ncasm = ncasmTypeSeen == 0x19 ? "66 19;"
+                : ncasmTypeSeen == 0x17 ? "66 17;"
+                : "66 19;66 17;";
+            return "batch \"22 00;" + ncasm + StateBatchTail;
+        }
 
         private readonly string backendPath;
         private readonly DeviceProfile[] profiles;
@@ -343,6 +357,13 @@ namespace Xm5ControlUi
         private GearButton appSettingsButton;
         private SliderControl levelSlider;
         private ChoiceDropdown ambientKindBox;
+        private ChoiceDropdown sensitivityBox;
+        private Label autoAmbientLabel;
+        private PillButton autoAmbientOnButton;
+        private PillButton autoAmbientOffButton;
+        private bool? autoAmbientSupported;
+        private bool updatingNoiseUi;
+        private int ncasmTypeSeen;
         private PillButton ancButton;
         private PillButton ambientButton;
         private PillButton offButton;
@@ -394,8 +415,10 @@ namespace Xm5ControlUi
 
             Text = AppTitle();
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(1180, 900);
-            Size = new Size(1380, 980);
+            // The noise control card is a fixed-height row and the equalizer card
+            // takes what is left, so these grew with the auto ambient sound row.
+            MinimumSize = new Size(1180, 964);
+            Size = new Size(1380, 1044);
             if (startMinimizedToTray)
             {
                 WindowState = FormWindowState.Minimized;
@@ -610,7 +633,7 @@ namespace Xm5ControlUi
                 Margin = new Padding(0, 0, 8, 0)
             };
             left.RowStyles.Add(new RowStyle(SizeType.Absolute, 194));
-            left.RowStyles.Add(new RowStyle(SizeType.Absolute, 280));
+            left.RowStyles.Add(new RowStyle(SizeType.Absolute, 344));
             left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             root.Controls.Add(left, 0, 1);
 
@@ -730,6 +753,79 @@ namespace Xm5ControlUi
             offButton.Click += async (s, e) => await SetOffAsync();
 
             AddDivider(parent, 140);
+
+            var autoCaption = new Label
+            {
+                Text = "Auto ambient sound",
+                ForeColor = ink,
+                Font = new Font("Segoe UI Semibold", 10f),
+                AutoEllipsis = true,
+                Location = new Point(CardInset, 158),
+                Size = new Size(220, 20)
+            };
+            parent.Controls.Add(autoCaption);
+
+            autoAmbientLabel = new Label
+            {
+                Text = "Waiting",
+                ForeColor = subdued,
+                Font = new Font("Segoe UI", 9.2f),
+                AutoEllipsis = true,
+                Location = new Point(CardInset, 180),
+                Size = new Size(220, 20)
+            };
+            parent.Controls.Add(autoAmbientLabel);
+
+            autoAmbientOnButton = NewOptionButton("On");
+            autoAmbientOffButton = NewOptionButton("Off");
+            parent.Controls.Add(autoAmbientOnButton);
+            parent.Controls.Add(autoAmbientOffButton);
+            autoAmbientOnButton.Click += async (s, e) => await SetAutoAmbientAsync(true);
+            autoAmbientOffButton.Click += async (s, e) => await SetAutoAmbientAsync(false);
+
+            sensitivityBox = new ChoiceDropdown
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                BackColor = cardSoft,
+                ForeColor = ink,
+                FlatStyle = FlatStyle.Flat,
+                Width = 132
+            };
+            sensitivityBox.Items.AddRange(new object[] { "Low", "Standard", "High" });
+            sensitivityBox.SelectedIndex = 1;
+            sensitivityBox.SelectedIndexChanged += async (s, e) =>
+            {
+                if (updatingNoiseUi) return;
+                await RunUiTaskAsync(() => SetAmbientSensitivityAsync(SelectedSensitivity()));
+            };
+            parent.Controls.Add(sensitivityBox);
+
+            Action layoutAutoRow = () =>
+            {
+                int x = parent.Width - CardInset;
+                PillButton[] pills = { autoAmbientOnButton, autoAmbientOffButton };
+                for (int i = pills.Length - 1; i >= 0; i--)
+                {
+                    int width = OptionButtonWidth(pills[i]);
+                    x -= width;
+                    pills[i].Location = new Point(x, 166);
+                    pills[i].Size = new Size(width, 32);
+                    x -= 8;
+                }
+
+                sensitivityBox.Width = 132;
+                x -= sensitivityBox.Width;
+                sensitivityBox.Location = new Point(x, 166);
+
+                int textWidth = Math.Max(120, x - CardInset - 12);
+                autoCaption.Width = textWidth;
+                autoAmbientLabel.Width = textWidth;
+            };
+            parent.Resize += (s, e) => layoutAutoRow();
+            layoutAutoRow();
+
+            AddDivider(parent, 208);
+
             var ambientLabel = new Label
             {
                 Text = "Ambient sound",
@@ -764,7 +860,9 @@ namespace Xm5ControlUi
 
             levelSlider = new SliderControl
             {
-                Minimum = 0,
+                // The headset clamps the ambient level to 1; asking for 0 comes
+                // back as 1, so do not offer a value it will not accept.
+                Minimum = 1,
                 Maximum = 20,
                 Value = 12,
                 TickFrequency = 2,
@@ -790,7 +888,7 @@ namespace Xm5ControlUi
             {
                 int sliderHeight = 34;
                 int sliderVisibleBottom = sliderHeight / 2 + 12;
-                int sliderTop = Math.Max(212, parent.Height - 22 - sliderVisibleBottom);
+                int sliderTop = Math.Max(282, parent.Height - 22 - sliderVisibleBottom);
                 int inputTop = sliderTop - 36;
                 int labelTop = inputTop - 28;
                 int right = parent.Width - CardInset;
@@ -1057,6 +1155,7 @@ namespace Xm5ControlUi
             UpdateShortcutsLabel();
 
             SetModeButtonState("Ambient");
+            SetAutoAmbientWaiting();
             SetMultipointState(null);
             SetConnectionQualityState(null);
             SetDseeState(null);
@@ -1215,6 +1314,8 @@ namespace Xm5ControlUi
             AddTrayAction(menu.Items, "Noise cancelling", SetAncAsync);
             AddTrayAction(menu.Items, "Ambient sound: 12", () => SetAmbientAsync(12));
             AddTrayAction(menu.Items, "Ambient sound: 20", () => SetAmbientAsync(20));
+            AddTrayAction(menu.Items, "Ambient sound: Auto", () => SetAutoAmbientAsync(true));
+            AddTrayAction(menu.Items, "Ambient sound: Manual", () => SetAutoAmbientAsync(false));
             AddTrayAction(menu.Items, "Noise control: Off", SetOffAsync);
             menu.Items.Add(new ToolStripSeparator());
             AddTrayAction(menu.Items, "Equalizer: Manual", () => SendEqualizerPresetAsync(0xA0));
@@ -1279,6 +1380,8 @@ namespace Xm5ControlUi
                 new ShortcutAction("anc", "Noise cancelling"),
                 new ShortcutAction("ambient12", "Ambient sound: 12"),
                 new ShortcutAction("ambient20", "Ambient sound: 20"),
+                new ShortcutAction("ambientauto", "Ambient sound: Auto"),
+                new ShortcutAction("ambientmanual", "Ambient sound: Manual"),
                 new ShortcutAction("off", "Noise control: Off"),
                 new ShortcutAction("eqmanual", "Equalizer: Manual"),
                 new ShortcutAction("equser1", "Equalizer: User 1"),
@@ -1643,6 +1746,14 @@ namespace Xm5ControlUi
             {
                 await SetAmbientAsync(20);
             }
+            else if (string.Equals(actionId, "ambientauto", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetAutoAmbientAsync(true);
+            }
+            else if (string.Equals(actionId, "ambientmanual", StringComparison.OrdinalIgnoreCase))
+            {
+                await SetAutoAmbientAsync(false);
+            }
             else if (string.Equals(actionId, "off", StringComparison.OrdinalIgnoreCase))
             {
                 await SetOffAsync();
@@ -1726,6 +1837,9 @@ namespace Xm5ControlUi
             if (profile == null) return false;
             bool changed = !ReferenceEquals(currentProfile, profile);
             currentProfile = profile;
+            // Which NCASM inquired type answers is a property of the device, so a
+            // different one has to prove it again.
+            if (changed) ncasmTypeSeen = 0;
             if (IsClosing) return changed;
 
             Text = AppTitle();
@@ -1830,7 +1944,7 @@ namespace Xm5ControlUi
             var detection = await DetectProfileAsync(false);
             if (IsClosing) return;
             if (detection == null) return;
-            var output = await RunBackendAsync(WithDevice(StateBatchCommand), "Updating");
+            var output = await RunBackendAsync(WithDevice(BuildStateBatchCommand()), "Updating");
             if (IsClosing) return;
             if (string.IsNullOrWhiteSpace(output)) return;
             if (!output.Contains("Could not open"))
@@ -1845,7 +1959,7 @@ namespace Xm5ControlUi
 
         private async Task RefreshCurrentStateQuietAsync(DeviceDetection detection)
         {
-            var output = await RunBackendQuietAsync(WithDevice(StateBatchCommand));
+            var output = await RunBackendQuietAsync(WithDevice(BuildStateBatchCommand()));
             if (IsClosing) return;
             if (string.IsNullOrWhiteSpace(output)) return;
             if (output.Contains("Could not open"))
@@ -1966,7 +2080,7 @@ namespace Xm5ControlUi
             bigDetailLabel.Text = "Noise cancelling active";
             SetModeButtonState("ANC");
             lastActionLabel.Text = "ANC selected";
-            await RunBackendAsync(WithDevice("anc --timeout 1200"), "Setting ANC");
+            ParseMode(await RunBackendAsync(WithDevice("ncasm-set --mode anc --timeout 1600"), "Setting ANC"));
         }
 
         private async Task SetAmbientAsync(int level, bool voice = false)
@@ -1974,14 +2088,55 @@ namespace Xm5ControlUi
             int clamped = Math.Max(levelSlider.Minimum, Math.Min(levelSlider.Maximum, level));
             levelSlider.Value = clamped;
             ambientKindBox.SelectedIndex = voice ? 1 : 0;
-            string ambientByte = voice ? "01" : "00";
-            string payload = "68 17 01 01 01 " + ambientByte + " " + clamped.ToString("X2");
             string kind = voice ? "Voice" : "Normal";
             bigModeLabel.Text = "Ambient";
             bigDetailLabel.Text = kind + " ambient level " + clamped;
             SetModeButtonState("Ambient");
             lastActionLabel.Text = (voice ? "Voice ambient " : "Ambient ") + clamped;
-            await RunBackendAsync(WithDevice("raw \"" + payload + "\" --ack-only --timeout 1200"), "Setting ambient");
+            string args = "ncasm-set --mode ambient --level " + clamped + " --voice " + (voice ? "on" : "off") + " --timeout 1600";
+            // Report what the headset applied rather than what was asked for.
+            // ParseMode refreshes these controls from the reply, and the two can
+            // differ because the headset clamps values it will not take. When it
+            // reports nothing the command did not land, so say that instead of
+            // presenting the requested value as a confirmation.
+            if (ParseMode(await RunBackendAsync(WithDevice(args), "Setting ambient")))
+            {
+                lastActionLabel.Text = (IsVoiceAmbientSelected() ? "Voice ambient " : "Ambient ") + levelSlider.Value;
+            }
+            else
+            {
+                lastActionLabel.Text = (voice ? "Voice ambient " : "Ambient ") + clamped + " not confirmed";
+            }
+        }
+
+        private async Task SetAutoAmbientAsync(bool enabled)
+        {
+            if (autoAmbientSupported == false)
+            {
+                lastActionLabel.Text = "Auto ambient not supported";
+                return;
+            }
+            lastActionLabel.Text = "Auto ambient " + (enabled ? "on" : "off");
+            // Auto and manual are two flavours of ambient sound, so both buttons
+            // select ambient and only the auto flag differs. Changing the mode on
+            // one and not the other made the pair behave inconsistently from noise
+            // cancelling, and left the tray entries named "Ambient sound: Auto" and
+            // "Ambient sound: Manual" promising something neither delivered.
+            string args = "ncasm-set --mode ambient --auto " + (enabled ? "on" : "off");
+            if (enabled) args += " --sensitivity " + SelectedSensitivity();
+            ParseMode(await RunBackendAsync(WithDevice(args + " --timeout 1600"), "Setting auto ambient"));
+        }
+
+        private async Task SetAmbientSensitivityAsync(string sensitivity)
+        {
+            if (autoAmbientSupported == false)
+            {
+                lastActionLabel.Text = "Auto ambient not supported";
+                return;
+            }
+            lastActionLabel.Text = "Auto ambient sensitivity " + sensitivity;
+            string args = "ncasm-set --auto on --sensitivity " + sensitivity + " --timeout 1600";
+            ParseMode(await RunBackendAsync(WithDevice(args), "Setting sensitivity"));
         }
 
         private async Task SetOffAsync()
@@ -1990,7 +2145,7 @@ namespace Xm5ControlUi
             bigDetailLabel.Text = "Noise control disabled";
             SetModeButtonState("Off");
             lastActionLabel.Text = "Noise control off";
-            await RunBackendAsync(WithDevice("off --timeout 1200"), "Turning off");
+            ParseMode(await RunBackendAsync(WithDevice("ncasm-set --mode off --timeout 1600"), "Turning off"));
         }
 
         private async Task SetDseeAsync(bool enabled)
@@ -2466,26 +2621,124 @@ namespace Xm5ControlUi
             await RunBackendAsync(WithDevice("raw \"28 05 11 00\" --ack-only --timeout 1200"), "Setting auto power");
         }
 
-        private void ParseMode(string output)
+        private bool ParseMode(string output)
         {
-            var match = Regex.Match(output, @"ncasm:\s*changed;\s*master\s*(\w+);\s*mode\s*(\w+);\s*ambient\s*(\w+)=(\d+)", RegexOptions.IgnoreCase);
-            if (!match.Success) return;
+            // The backend prints one line per NCASM inquired type it gets an answer
+            // for. Older models only answer type 0x17; the WF-1000XM6 answers both,
+            // but only its 0x19 reply carries real values, so prefer whichever line
+            // reports the auto ambient fields.
+            var matches = Regex.Matches(output,
+                @"ncasm:\s*type=(\w+);\s*master\s*(\w+);\s*mode\s*(\w+);\s*voice\s*(\w+);\s*level\s*(\d+)(?:;\s*auto\s*(\w+);\s*sensitivity\s*(\w+))?",
+                RegexOptions.IgnoreCase);
+            if (matches.Count == 0) return false;
 
-            string master = Capitalize(match.Groups[1].Value);
-            string mode = match.Groups[2].Value.Equals("anc", StringComparison.OrdinalIgnoreCase) ? "ANC" : Capitalize(match.Groups[2].Value);
-            string ambient = Capitalize(match.Groups[3].Value);
-            string level = match.Groups[4].Value;
+            Match match = null;
+            foreach (Match candidate in matches)
+            {
+                if (candidate.Groups[6].Success) { match = candidate; break; }
+                if (match == null) match = candidate;
+            }
+
+            // The WF-1000XM6 answers 66 17 as well, with every field zero, which
+            // is indistinguishable from an older model reporting noise control
+            // off. So once 0x19 has answered for this device, a lone 0x17 line
+            // means its reply went missing - report nothing rather than a state
+            // the headset is not in.
+            int lineType = string.Equals(match.Groups[1].Value, "19", StringComparison.OrdinalIgnoreCase) ? 0x19 : 0x17;
+            if (lineType == 0x19) ncasmTypeSeen = 0x19;
+            else if (ncasmTypeSeen == 0x19) return false;
+            else ncasmTypeSeen = 0x17;
+
+            string master = Capitalize(match.Groups[2].Value);
+            string mode = match.Groups[3].Value.Equals("anc", StringComparison.OrdinalIgnoreCase) ? "ANC" : Capitalize(match.Groups[3].Value);
+            bool voice = match.Groups[4].Value.Equals("on", StringComparison.OrdinalIgnoreCase);
+            string level = match.Groups[5].Value;
+            bool hasAuto = match.Groups[6].Success;
+            bool auto = hasAuto && match.Groups[6].Value.Equals("on", StringComparison.OrdinalIgnoreCase);
+            string sensitivity = hasAuto ? Capitalize(match.Groups[7].Value) : null;
+
+            // The headset keeps the ambient level, voice and auto values while
+            // noise cancelling is selected, so describe them only when ambient is
+            // the mode actually in effect.
+            string detail;
+            if (master == "Off") detail = "Noise control disabled";
+            else if (mode == "ANC") detail = "Noise cancelling active";
+            else if (hasAuto && auto) detail = "Auto ambient (" + sensitivity + ")";
+            else detail = (voice ? "Voice" : "Normal") + " ambient level " + level;
 
             bigModeLabel.Text = master == "Off" ? "Off" : mode;
-            bigDetailLabel.Text = master == "Off" ? "Noise control disabled" : ambient + " ambient level " + level;
+            bigDetailLabel.Text = detail;
             SetModeButtonState(master == "Off" ? "Off" : mode);
 
-            int parsed;
-            if (int.TryParse(level, out parsed) && parsed >= levelSlider.Minimum && parsed <= levelSlider.Maximum)
+            updatingNoiseUi = true;
+            try
             {
-                levelSlider.Value = parsed;
+                int parsed;
+                if (int.TryParse(level, out parsed) && parsed >= levelSlider.Minimum && parsed <= levelSlider.Maximum)
+                {
+                    levelSlider.Value = parsed;
+                }
+                ambientKindBox.SelectedIndex = voice ? 1 : 0;
+                SetAutoAmbientState(hasAuto ? (bool?)auto : null, sensitivity);
             }
-            ambientKindBox.SelectedIndex = ambient.Equals("Voice", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+            finally
+            {
+                updatingNoiseUi = false;
+            }
+            return true;
+        }
+
+        private void SetAutoAmbientWaiting()
+        {
+            autoAmbientSupported = null;
+            if (autoAmbientLabel != null) autoAmbientLabel.Text = "Waiting";
+            SetOptionPair(autoAmbientOnButton, autoAmbientOffButton, null, blue, blue);
+            if (autoAmbientOnButton != null) autoAmbientOnButton.Enabled = false;
+            if (autoAmbientOffButton != null) autoAmbientOffButton.Enabled = false;
+            if (sensitivityBox != null) sensitivityBox.Enabled = false;
+        }
+
+        private void SetAutoAmbientState(bool? auto, string sensitivity)
+        {
+            autoAmbientSupported = auto.HasValue;
+
+            if (autoAmbientLabel != null)
+            {
+                if (!auto.HasValue) autoAmbientLabel.Text = "Not supported";
+                else if (auto.Value) autoAmbientLabel.Text = "On · " + (sensitivity ?? "Standard");
+                else autoAmbientLabel.Text = "Off";
+            }
+
+            SetOptionPair(autoAmbientOnButton, autoAmbientOffButton, auto, blue, blue);
+            if (autoAmbientOnButton != null) autoAmbientOnButton.Enabled = auto.HasValue;
+            if (autoAmbientOffButton != null) autoAmbientOffButton.Enabled = auto.HasValue;
+
+            if (sensitivityBox != null)
+            {
+                sensitivityBox.Enabled = auto.HasValue && auto.Value;
+                int index = SensitivityIndex(sensitivity);
+                if (index >= 0 && sensitivityBox.SelectedIndex != index) sensitivityBox.SelectedIndex = index;
+            }
+        }
+
+        private static int SensitivityIndex(string sensitivity)
+        {
+            if (string.IsNullOrEmpty(sensitivity)) return -1;
+            if (sensitivity.Equals("Low", StringComparison.OrdinalIgnoreCase)) return 0;
+            if (sensitivity.Equals("Standard", StringComparison.OrdinalIgnoreCase)) return 1;
+            if (sensitivity.Equals("High", StringComparison.OrdinalIgnoreCase)) return 2;
+            return -1;
+        }
+
+        private string SelectedSensitivity()
+        {
+            if (sensitivityBox == null || sensitivityBox.SelectedIndex < 0) return "standard";
+            switch (sensitivityBox.SelectedIndex)
+            {
+                case 0: return "low";
+                case 2: return "high";
+                default: return "standard";
+            }
         }
 
         private async Task<string> RunBackendAsync(string args, string busyText)

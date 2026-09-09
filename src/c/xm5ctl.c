@@ -59,6 +59,12 @@ typedef struct {
     bool no_ack;
     bool ack_only;
     int ambient_level;
+    /* NC/ambient changes; -1 leaves the current device value alone. */
+    int set_mode;        /* 0 = off, 1 = anc, 2 = ambient */
+    int set_level;       /* 0..20 */
+    int set_voice;       /* 0 = normal, 1 = voice */
+    int set_auto;        /* 0 = off, 1 = on */
+    int set_sensitivity; /* 0 = standard, 1 = high, 2 = low */
 } options_t;
 
 static void print_usage(void) {
@@ -68,6 +74,9 @@ static void print_usage(void) {
     puts("  xm5ctl scan [--name TEXT]");
     puts("  xm5ctl battery [--timeout MS] [--name TEXT]");
     puts("  xm5ctl ncasm [--timeout MS] [--name TEXT]");
+    puts("  xm5ctl ncasm-set [--mode anc|ambient|off] [--level 0..20] [--voice on|off]");
+    puts("                   [--auto on|off] [--sensitivity low|standard|high]");
+    puts("  xm5ctl listen [--timeout MS] [--hex]");
     puts("  xm5ctl raw \"22 00\" [--data-type mdr|mdr2] [--ack-only] [--no-ack]");
     puts("  xm5ctl batch \"22 00;66 17;E6 01\" [--timeout MS] [--name TEXT]");
     puts("  xm5ctl anc");
@@ -332,6 +341,8 @@ static int parser_add(parser_t *parser, const uint8_t *bytes, size_t len, mdr_fr
     return count;
 }
 
+static bool g_hex_dump = false;
+
 static const char *charging_text(uint8_t b) {
     switch (b) {
     case 0: return "not-charging";
@@ -379,9 +390,97 @@ static const char *ambient_mode_text(uint8_t b) {
     }
 }
 
+/* Auto ambient sensitivity, reported by NCASM type 0x19 (WF-1000XM6). */
+static const char *sensitivity_text(uint8_t b) {
+    switch (b) {
+    case 0: return "standard";
+    case 1: return "high";
+    case 2: return "low";
+    default: return "unknown";
+    }
+}
+
+static bool sensitivity_value(const char *text, uint8_t *out) {
+    if (strcmp(text, "standard") == 0) { *out = 0; return true; }
+    if (strcmp(text, "high") == 0) { *out = 1; return true; }
+    if (strcmp(text, "low") == 0) { *out = 2; return true; }
+    return false;
+}
+
+/*
+ * NC/ambient state. Older models answer NCASM inquired type 0x17 with five
+ * parameter bytes; the WF-1000XM6 answers type 0x19 with seven, adding the
+ * auto ambient toggle and its sensitivity.
+ */
+typedef struct {
+    bool valid;
+    uint8_t type;
+    uint8_t effect;
+    uint8_t master;
+    uint8_t mode;
+    uint8_t voice;
+    uint8_t level;
+    bool has_auto;
+    uint8_t asm_auto;
+    uint8_t sensitivity;
+} ncasm_state_t;
+
+/*
+ * Decode an NCASM state frame. Pass want_type 0x17 or 0x19 to accept only a
+ * reply to that inquired type, or 0 to accept either. A frame carrying a type
+ * other than the one that was asked for says nothing about the request still
+ * outstanding, and treating it as the answer lets a stray notification stand in
+ * for the real state.
+ */
+static bool parse_ncasm(const uint8_t *p, size_t n, uint8_t want_type, ncasm_state_t *out) {
+    if (n < 7 || (p[0] != 0x67 && p[0] != 0x69)) {
+        return false;
+    }
+    if (p[1] != 0x17 && p[1] != 0x19) {
+        return false;
+    }
+    if (want_type != 0 && p[1] != want_type) {
+        return false;
+    }
+    ZeroMemory(out, sizeof(*out));
+    out->type = p[1];
+    out->effect = p[2];
+    out->master = p[3];
+    out->mode = p[4];
+    out->voice = p[5];
+    out->level = p[6];
+    if (p[1] == 0x19) {
+        if (n < 9) return false;
+        out->has_auto = true;
+        out->asm_auto = p[7];
+        out->sensitivity = p[8];
+    }
+    out->valid = true;
+    return true;
+}
+
+static void print_ncasm_state(const ncasm_state_t *st) {
+    printf("ncasm: type=%02X; master %s; mode %s; voice %s; level %u",
+        st->type,
+        onoff_text(st->master),
+        st->mode == 0 ? "anc" : (st->mode == 1 ? "ambient" : "unknown"),
+        onoff_text(st->voice),
+        st->level);
+    if (st->has_auto) {
+        printf("; auto %s; sensitivity %s", onoff_text(st->asm_auto), sensitivity_text(st->sensitivity));
+    }
+    putchar('\n');
+}
+
 static void print_known_payload(const mdr_frame_t *frame) {
     const uint8_t *p = frame->payload;
     size_t n = frame->payload_len;
+
+    if (g_hex_dump) {
+        printf("RX %s seq=%u %s raw: ", data_type_name(frame->data_type), frame->sequence, frame->valid ? "ok" : "bad");
+        print_hex(p, n);
+        putchar('\n');
+    }
 
     if (!frame->valid) {
         printf("invalid frame: %s\n", frame->error);
@@ -418,19 +517,20 @@ static void print_known_payload(const mdr_frame_t *frame) {
         }
         return;
     case 0x67:
-    case 0x69:
-        if (n >= 7 && p[1] == 0x13) {
+    case 0x69: {
+        ncasm_state_t st;
+        if (parse_ncasm(p, n, 0, &st)) {
+            print_ncasm_state(&st);
+        } else if (n >= 7 && p[1] == 0x13) {
             printf("ncasm: %s; master %s; anc %s; ambient %s=%u\n",
                 p[2] == 1 ? "changed" : "changing", onoff_text(p[3]), onoff_text(p[4]), ambient_mode_text(p[5]), p[6]);
-        } else if (n >= 7 && p[1] == 0x17) {
-            printf("ncasm: %s; master %s; mode %s; ambient %s=%u\n",
-                p[2] == 1 ? "changed" : "changing", onoff_text(p[3]), p[4] == 0 ? "anc" : (p[4] == 1 ? "ambient" : "unknown"), ambient_mode_text(p[5]), p[6]);
         } else {
             printf("ncasm param: ");
             print_hex(p, n);
             putchar('\n');
         }
         return;
+    }
     default:
         printf("%s seq=%u payload: ", data_type_name(frame->data_type), frame->sequence);
         print_hex(p, n);
@@ -692,6 +792,11 @@ static bool parse_options(int argc, char **argv, options_t *opt) {
     opt->timeout_ms = 5000;
     opt->data_type = 0x0c;
     opt->ambient_level = 10;
+    opt->set_mode = -1;
+    opt->set_level = -1;
+    opt->set_voice = -1;
+    opt->set_auto = -1;
+    opt->set_sensitivity = -1;
 
     int i = 2;
     if (strcmp(opt->action, "raw") == 0) {
@@ -730,6 +835,46 @@ static bool parse_options(int argc, char **argv, options_t *opt) {
                 fprintf(stderr, "unknown data type: %s\n", dt);
                 return false;
             }
+        } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (strcmp(m, "off") == 0) opt->set_mode = 0;
+            else if (strcmp(m, "anc") == 0) opt->set_mode = 1;
+            else if (strcmp(m, "ambient") == 0) opt->set_mode = 2;
+            else {
+                fprintf(stderr, "mode must be anc, ambient or off\n");
+                return false;
+            }
+        } else if (strcmp(argv[i], "--level") == 0 && i + 1 < argc) {
+            opt->set_level = atoi(argv[++i]);
+            if (opt->set_level < 0 || opt->set_level > 20) {
+                fprintf(stderr, "ambient level must be 0..20\n");
+                return false;
+            }
+        } else if (strcmp(argv[i], "--voice") == 0 && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (strcmp(v, "on") == 0) opt->set_voice = 1;
+            else if (strcmp(v, "off") == 0) opt->set_voice = 0;
+            else {
+                fprintf(stderr, "voice must be on or off\n");
+                return false;
+            }
+        } else if (strcmp(argv[i], "--auto") == 0 && i + 1 < argc) {
+            const char *a = argv[++i];
+            if (strcmp(a, "on") == 0) opt->set_auto = 1;
+            else if (strcmp(a, "off") == 0) opt->set_auto = 0;
+            else {
+                fprintf(stderr, "auto must be on or off\n");
+                return false;
+            }
+        } else if (strcmp(argv[i], "--sensitivity") == 0 && i + 1 < argc) {
+            uint8_t sens;
+            if (!sensitivity_value(argv[++i], &sens)) {
+                fprintf(stderr, "sensitivity must be low, standard or high\n");
+                return false;
+            }
+            opt->set_sensitivity = (int)sens;
+        } else if (strcmp(argv[i], "--hex") == 0) {
+            g_hex_dump = true;
         } else if (strcmp(argv[i], "--no-ack") == 0) {
             opt->no_ack = true;
         } else if (strcmp(argv[i], "--ack-only") == 0) {
@@ -848,6 +993,200 @@ static int invoke_batch(const options_t *opt) {
     return rc;
 }
 
+/* Ask for one NCASM inquired type and decode the reply to that same type. */
+static bool ncasm_query(SOCKET s, uint8_t type, int timeout_ms, uint8_t *seq, ncasm_state_t *out) {
+    uint8_t payload[2];
+    mdr_frame_t responses[8];
+    int count;
+
+    payload[0] = 0x66;
+    payload[1] = type;
+    count = send_payload_seq(s, payload, sizeof(payload), 0x0c, *seq,
+                             timeout_ms, false, 0x67, responses, (int)ARRAY_LEN(responses));
+    *seq = (uint8_t)(1u - *seq);
+    if (count < 0) {
+        return false;
+    }
+    for (int i = 0; i < count; i++) {
+        if (!responses[i].valid) continue;
+        if (parse_ncasm(responses[i].payload, responses[i].payload_len, type, out)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Ask the headset for its NC/ambient state. Newer models (WF-1000XM6) answer
+ * inquired type 0x19; older ones answer 0x17 and ignore 0x19 entirely, so try
+ * the richer type first and fall back.
+ *
+ * The fallback needs care, for two reasons.
+ *
+ * A failed query is not the same as an unsupported one. send_payload_seq
+ * reports a link error and a refused ACK the same way, so a single failure is
+ * no evidence about which types the model implements - hence each type is
+ * tried rather than the first failure ending the probe.
+ *
+ * And the WF-1000XM6 answers type 0x17 too, with every parameter byte zero.
+ * That is indistinguishable from an older model reporting noise control off,
+ * so believing it after a 0x19 reply merely went missing would feed an
+ * all-zero state into the read-modify-write below and switch the headset off.
+ * A 0x19 silence is therefore confirmed with a second attempt before the 0x17
+ * answer is accepted.
+ */
+static bool ncasm_probe(SOCKET s, int timeout_ms, uint8_t *seq, ncasm_state_t *out) {
+    ncasm_state_t rich;
+
+    if (ncasm_query(s, 0x19, timeout_ms, seq, out)) {
+        return true;
+    }
+    if (!ncasm_query(s, 0x17, timeout_ms, seq, out)) {
+        return false;
+    }
+    if (ncasm_query(s, 0x19, timeout_ms, seq, &rich)) {
+        *out = rich;
+        return true;
+    }
+    return true;
+}
+
+static int invoke_ncasm_get(const options_t *opt) {
+    SOCKET s;
+    wchar_t selected[BLUETOOTH_MAX_NAME_SIZE] = L"";
+    ncasm_state_t st;
+    uint8_t seq = 0;
+
+    s = connect_best(opt->name_filter, opt->timeout_ms, selected, ARRAY_LEN(selected));
+    if (s == INVALID_SOCKET) {
+        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        return 1;
+    }
+    wprintf(L"Connecting to %ls, protocol v2...\n", selected[0] ? selected : L"<unnamed>");
+
+    if (!ncasm_probe(s, opt->timeout_ms, &seq, &st)) {
+        closesocket(s);
+        puts("ncasm: no supported noise control state reported.");
+        return 1;
+    }
+    closesocket(s);
+    print_ncasm_state(&st);
+    return 0;
+}
+
+/*
+ * Read the current NC/ambient state, apply only the fields the caller asked
+ * for, and write the whole block back. The headset stores every field in one
+ * command, so a partial write silently clears anything left out - that is how
+ * a plain mode change used to switch auto ambient off.
+ */
+static int invoke_ncasm_set(const options_t *opt) {
+    SOCKET s;
+    wchar_t selected[BLUETOOTH_MAX_NAME_SIZE] = L"";
+    ncasm_state_t st;
+    uint8_t payload[9];
+    size_t payload_len;
+    mdr_frame_t responses[8];
+    int count;
+    uint8_t seq = 0;
+
+    s = connect_best(opt->name_filter, opt->timeout_ms, selected, ARRAY_LEN(selected));
+    if (s == INVALID_SOCKET) {
+        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        return 1;
+    }
+    wprintf(L"Connecting to %ls, protocol v2...\n", selected[0] ? selected : L"<unnamed>");
+
+    if (!ncasm_probe(s, opt->timeout_ms, &seq, &st)) {
+        closesocket(s);
+        fprintf(stderr, "Headset did not report a supported noise control state.\n");
+        return 1;
+    }
+
+    if (opt->set_mode == 0) {
+        st.master = 0;
+    } else if (opt->set_mode == 1) {
+        st.master = 1;
+        st.mode = 0;
+    } else if (opt->set_mode == 2) {
+        st.master = 1;
+        st.mode = 1;
+    }
+    if (opt->set_level >= 0) st.level = (uint8_t)opt->set_level;
+    if (opt->set_voice >= 0) st.voice = (uint8_t)opt->set_voice;
+    if (st.has_auto) {
+        if (opt->set_auto >= 0) st.asm_auto = (uint8_t)opt->set_auto;
+        if (opt->set_sensitivity >= 0) st.sensitivity = (uint8_t)opt->set_sensitivity;
+    } else if (opt->set_auto >= 0 || opt->set_sensitivity >= 0) {
+        fprintf(stderr, "Headset does not support auto ambient sound; ignoring --auto/--sensitivity.\n");
+    }
+
+    payload[0] = 0x68;
+    payload[1] = st.type;
+    payload[2] = 0x01;
+    payload[3] = st.master;
+    payload[4] = st.mode;
+    payload[5] = st.voice;
+    payload[6] = st.level;
+    payload_len = 7;
+    if (st.has_auto) {
+        payload[7] = st.asm_auto;
+        payload[8] = st.sensitivity;
+        payload_len = 9;
+    }
+
+    printf("TX DATA_MDR payload: ");
+    print_hex(payload, payload_len);
+    putchar('\n');
+
+    count = send_payload_seq(s, payload, payload_len, 0x0c, seq, opt->timeout_ms, opt->no_ack,
+                             0x69, responses, (int)ARRAY_LEN(responses));
+    closesocket(s);
+    if (count < 0) {
+        return 1;
+    }
+    for (int i = 0; i < count; i++) {
+        print_known_payload(&responses[i]);
+    }
+    if (count == 0) {
+        puts("control accepted (ACK)");
+    }
+    return 0;
+}
+
+static int invoke_listen(const options_t *opt) {
+    SOCKET s;
+    wchar_t selected[BLUETOOTH_MAX_NAME_SIZE] = L"";
+    parser_t parser = { 0 };
+    DWORD start;
+
+    s = connect_best(opt->name_filter, 4000, selected, ARRAY_LEN(selected));
+    if (s == INVALID_SOCKET) {
+        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        return 1;
+    }
+
+    wprintf(L"Listening on %ls for %d ms...\n", selected[0] ? selected : L"<unnamed>", opt->timeout_ms);
+    fflush(stdout);
+
+    start = GetTickCount();
+    while ((int)(GetTickCount() - start) < opt->timeout_ms) {
+        mdr_frame_t rx[8];
+        int count = recv_frames(s, &parser, 250, rx, (int)ARRAY_LEN(rx));
+        if (count < 0) break;
+        for (int i = 0; i < count; i++) {
+            if (rx[i].valid && rx[i].data_type == 0x01) continue;
+            if (rx[i].valid && rx[i].ack_required) send_ack(s, rx[i].sequence);
+            printf("[%5u ms] ", (unsigned)(GetTickCount() - start));
+            print_known_payload(&rx[i]);
+            fflush(stdout);
+        }
+    }
+
+    closesocket(s);
+    return 0;
+}
+
 static int invoke_sequence(const options_t *opt, const uint8_t *first, size_t first_len,
                            const uint8_t *second, size_t second_len, const char *label) {
     SOCKET s;
@@ -912,22 +1251,25 @@ int main(int argc, char **argv) {
         const uint8_t payload[] = { 0x22, 0x00 };
         rc = invoke_payload(&opt, payload, sizeof(payload), 0x0c, 0x23);
     } else if (strcmp(opt.action, "ncasm") == 0) {
-        const uint8_t payload[] = { 0x62, 0x17 };
-        rc = invoke_payload(&opt, payload, sizeof(payload), 0x0c, 0x63);
+        rc = invoke_ncasm_get(&opt);
+    } else if (strcmp(opt.action, "ncasm-set") == 0) {
+        rc = invoke_ncasm_set(&opt);
     } else if (strcmp(opt.action, "raw") == 0) {
         rc = invoke_payload(&opt, opt.raw_payload, opt.raw_len, opt.data_type, opt.ack_only ? -2 : -1);
+    } else if (strcmp(opt.action, "listen") == 0) {
+        rc = invoke_listen(&opt);
     } else if (strcmp(opt.action, "batch") == 0) {
         rc = invoke_batch(&opt);
     } else if (strcmp(opt.action, "anc") == 0) {
-        const uint8_t payload[] = { 0x68, 0x17, 0x01, 0x01, 0x00, 0x00, 0x00 };
-        rc = invoke_payload(&opt, payload, sizeof(payload), 0x0c, -2);
+        opt.set_mode = 1;
+        rc = invoke_ncasm_set(&opt);
     } else if (strcmp(opt.action, "ambient") == 0) {
-        uint8_t payload[] = { 0x68, 0x17, 0x01, 0x01, 0x01, 0x00, 0x0a };
-        payload[6] = (uint8_t)opt.ambient_level;
-        rc = invoke_payload(&opt, payload, sizeof(payload), 0x0c, -2);
+        opt.set_mode = 2;
+        if (opt.set_level < 0) opt.set_level = opt.ambient_level;
+        rc = invoke_ncasm_set(&opt);
     } else if (strcmp(opt.action, "off") == 0) {
-        const uint8_t payload[] = { 0x68, 0x17, 0x01, 0x00, 0x00, 0x00, 0x00 };
-        rc = invoke_payload(&opt, payload, sizeof(payload), 0x0c, -2);
+        opt.set_mode = 0;
+        rc = invoke_ncasm_set(&opt);
     } else {
         fprintf(stderr, "unknown action: %s\n", opt.action);
         print_usage();
