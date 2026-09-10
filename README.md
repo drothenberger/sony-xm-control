@@ -22,6 +22,7 @@ Unofficial Windows controller for Sony 1000X headphones and earbuds.
 - Clear Bass control
 - DSEE Extreme Auto/Off
 - Bluetooth connection quality mode
+- Active codec display
 - Multipoint toggle
 - Speak-to-Chat toggle
 - Wearing sensor pause toggle
@@ -82,6 +83,12 @@ current while an earbud is docked, and an earbud in the case stops reporting, so
 its level freezes at the last value the connected side saw. Neither the case nor
 the earbuds expose a usable charging state on that model, so the case level is
 reported without one.
+
+The active codec comes from the device information blob returned by `12 00`,
+which reports it as a letter: `S` is SBC, `A` is AAC and `L` is LDAC. It follows
+whichever connection last played audio rather than a fixed link, so on a
+multipoint setup it changes as audio moves between devices, and it keeps the
+last value once playback stops.
 
 Useful when adding support for a new model:
 

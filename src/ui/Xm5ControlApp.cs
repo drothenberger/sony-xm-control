@@ -301,7 +301,7 @@ namespace Xm5ControlUi
             string ncasm = ncasmTypeSeen == 0x19 ? "66 19;"
                 : ncasmTypeSeen == 0x17 ? "66 17;"
                 : "66 19;66 17;";
-            return "batch \"" + battery + ncasm + StateBatchTail;
+            return "batch \"" + battery + "12 00;" + ncasm + StateBatchTail;
         }
 
         private readonly string backendPath;
@@ -346,6 +346,10 @@ namespace Xm5ControlUi
         private Label eqCardSummaryLabel;
         private Label dseeLabel;
         private Label connectionQualityLabel;
+        private Label codecLabel;
+        private PillButton lowLatencyButton;
+        private bool lowLatencyActive;
+        private const string LowLatencyHint = "Use Sound Connect to turn Low Latency on and off.";
         private Label speakToChatLabel;
         private Label wearPauseLabel;
         private Label touchPanelLabel;
@@ -1090,52 +1094,63 @@ namespace Xm5ControlUi
             AddEyebrow(parent, "Device", 62);
             connectionLabel = AddActionRow(parent, "Connection", "Waiting", 84);
             batteryLabel = AddActionRow(parent, "Battery", "Waiting", 128);
+            codecLabel = AddActionRow(parent, "Codec", "Waiting", 172);
             soundQualityButton = NewOptionButton("Quality");
             stableButton = NewOptionButton("Stability");
-            connectionQualityLabel = AddActionRow(parent, "Bluetooth connection quality", "Waiting", 172, soundQualityButton, stableButton);
+            lowLatencyButton = NewOptionButton("Low Latency");
+            // Shortened from "Bluetooth connection quality": the third button
+            // leaves too little room, and everything in this card is Bluetooth.
+            connectionQualityLabel = AddActionRow(parent, "Connection quality", "Waiting", 216, soundQualityButton, stableButton, lowLatencyButton);
             soundQualityButton.Click += async (s, e) => await SetConnectionQualityAsync(true);
             stableButton.Click += async (s, e) => await SetConnectionQualityAsync(false);
+            // Shown so the setting is visible, never sent. Low latency is not a
+            // headset setting alone: it also needs LE Audio enabled for the
+            // headset in the operating system's Bluetooth settings, which this app
+            // cannot do. Left enabled because a disabled control gets no mouse
+            // events and so could not show the tooltip explaining that.
+            lowLatencyButton.Click += (s, e) => lastActionLabel.Text = LowLatencyHint;
+            toolTip.SetToolTip(lowLatencyButton, LowLatencyHint);
 
             multipointOnButton = NewOptionButton("On");
             multipointOffButton = NewOptionButton("Off");
-            multipointLabel = AddActionRow(parent, "Multipoint support", "Waiting", 222, multipointOnButton, multipointOffButton);
+            multipointLabel = AddActionRow(parent, "Multipoint support", "Waiting", 266, multipointOnButton, multipointOffButton);
             multipointOnButton.Click += async (s, e) => await SetMultipointAsync(true);
             multipointOffButton.Click += async (s, e) => await SetMultipointAsync(false);
 
-            AddDivider(parent, 278);
-            AddEyebrow(parent, "Sound", 300);
+            AddDivider(parent, 322);
+            AddEyebrow(parent, "Sound", 344);
 
             dseeAutoButton = NewOptionButton("Auto");
             dseeOffButton = NewOptionButton("Off");
-            dseeLabel = AddActionRow(parent, "DSEE Extreme", "Waiting", 322, dseeAutoButton, dseeOffButton);
+            dseeLabel = AddActionRow(parent, "DSEE Extreme", "Waiting", 366, dseeAutoButton, dseeOffButton);
             dseeAutoButton.Click += async (s, e) => await SetDseeAsync(true);
             dseeOffButton.Click += async (s, e) => await SetDseeAsync(false);
 
-            AddDivider(parent, 378);
-            AddEyebrow(parent, "Controls", 400);
+            AddDivider(parent, 422);
+            AddEyebrow(parent, "Controls", 444);
             speakOnButton = NewOptionButton("On");
             speakOffButton = NewOptionButton("Off");
-            speakToChatLabel = AddActionRow(parent, "Speak-to-Chat", "Waiting", 422, speakOnButton, speakOffButton);
+            speakToChatLabel = AddActionRow(parent, "Speak-to-Chat", "Waiting", 466, speakOnButton, speakOffButton);
             speakOnButton.Click += async (s, e) => await SetSpeakToChatAsync(true);
             speakOffButton.Click += async (s, e) => await SetSpeakToChatAsync(false);
 
             pauseOnButton = NewOptionButton("On");
             pauseOffButton = NewOptionButton("Off");
-            wearPauseLabel = AddActionRow(parent, "Pause when headphones are removed", "Waiting", 470, pauseOnButton, pauseOffButton);
+            wearPauseLabel = AddActionRow(parent, "Pause when headphones are removed", "Waiting", 514, pauseOnButton, pauseOffButton);
             pauseOnButton.Click += async (s, e) => await SetWearPauseAsync(true);
             pauseOffButton.Click += async (s, e) => await SetWearPauseAsync(false);
 
             touchOnButton = NewOptionButton("On");
             touchOffButton = NewOptionButton("Off");
-            touchPanelLabel = AddActionRow(parent, "Touch sensor control panel", "Waiting", 518, touchOnButton, touchOffButton);
+            touchPanelLabel = AddActionRow(parent, "Touch sensor control panel", "Waiting", 562, touchOnButton, touchOffButton);
             touchOnButton.Click += async (s, e) => await SetTouchPanelAsync(true);
             touchOffButton.Click += async (s, e) => await SetTouchPanelAsync(false);
 
-            AddDivider(parent, 574);
-            AddEyebrow(parent, "Power", 596);
+            AddDivider(parent, 618);
+            AddEyebrow(parent, "Power", 640);
             autoPowerRemovedButton = NewOptionButton("On");
             autoPowerDisableButton = NewOptionButton("Off");
-            autoPowerLabel = AddActionRow(parent, "Automatic power off", "Waiting", 618, autoPowerRemovedButton, autoPowerDisableButton);
+            autoPowerLabel = AddActionRow(parent, "Automatic power off", "Waiting", 662, autoPowerRemovedButton, autoPowerDisableButton);
             autoPowerRemovedButton.Click += async (s, e) => await SetAutoPowerRemovedAsync();
             autoPowerDisableButton.Click += async (s, e) => await SetAutoPowerDisabledAsync();
 
@@ -1188,7 +1203,7 @@ namespace Xm5ControlUi
         private void LayoutShortcutsRow(Control parent)
         {
             if (parent == null) return;
-            int dividerTop = Math.Max(686, parent.Height - 126);
+            int dividerTop = Math.Max(730, parent.Height - 126);
             if (shortcutsDivider != null && !shortcutsDivider.IsDisposed)
             {
                 shortcutsDivider.Location = new Point(CardInset, dividerTop);
@@ -1235,6 +1250,33 @@ namespace Xm5ControlUi
         {
             if (connectionQualityLabel != null) connectionQualityLabel.Text = prioritizeSound.HasValue ? (prioritizeSound.Value ? "Quality" : "Stability") : "Waiting";
             SetOptionPair(soundQualityButton, stableButton, prioritizeSound, blue, blue);
+            SetButtonSelected(lowLatencyButton, false, blue);
+            lowLatencyActive = false;
+            toolTip.SetToolTip(soundQualityButton, null);
+            toolTip.SetToolTip(stableButton, null);
+        }
+
+        /*
+         * Low latency is a third setting that the E6 00 query cannot report: it
+         * answers 0 both for prioritised sound quality and for low latency. Only
+         * the device information blob distinguishes them. Selecting it in Sony's
+         * app requires unpairing and re-pairing the headset, so the buttons are
+         * disabled rather than offering a one-click way out of a state that is
+         * laborious to get back into.
+         */
+        private void SetConnectionQualityLowLatency()
+        {
+            if (connectionQualityLabel != null) connectionQualityLabel.Text = "Low Latency (LE Audio)";
+            SetOptionPair(soundQualityButton, stableButton, null, blue, blue);
+            SetButtonSelected(lowLatencyButton, true, blue);
+            // Sound Connect owns this setting in both directions, so the app will
+            // not switch out of low latency either. The buttons stay enabled and
+            // are made inert instead: a disabled control gets no mouse events, so
+            // clicking one would do nothing without saying why. The tray actions
+            // and keyboard shortcuts reach the same guard in SetConnectionQualityAsync.
+            lowLatencyActive = true;
+            toolTip.SetToolTip(soundQualityButton, LowLatencyHint);
+            toolTip.SetToolTip(stableButton, LowLatencyHint);
         }
 
         private void SetDseeState(bool? auto)
@@ -1967,6 +2009,7 @@ namespace Xm5ControlUi
                 MarkStateRefreshed(detection);
             }
             ParseBattery(output);
+            ParseCodec(output);
             ParseMode(output);
             ParseExtraSettings(output);
         }
@@ -1985,6 +2028,7 @@ namespace Xm5ControlUi
 
             if (connectionLabel != null) connectionLabel.Text = "Connected";
             ParseBattery(output);
+            ParseCodec(output);
             ParseMode(output);
             ParseExtraSettings(output);
             MarkStateRefreshed(detection);
@@ -1996,6 +2040,18 @@ namespace Xm5ControlUi
             lastStateRefreshProfile = detection != null ? detection.Profile : currentProfile;
             lastStateRefreshConnected = true;
             lastStateRefreshAt = DateTime.UtcNow;
+        }
+
+        private void ParseCodec(string output)
+        {
+            if (codecLabel == null) return;
+            var match = Regex.Match(output, @"(?m)^codec:\s*(.+?)\s*$", RegexOptions.IgnoreCase);
+            if (!match.Success) return;
+
+            string value = match.Groups[1].Value;
+            // The headset reports the codec of whichever connection is playing,
+            // so on a multipoint setup this follows the active device.
+            codecLabel.Text = value.Equals("unknown", StringComparison.OrdinalIgnoreCase) ? "Unknown" : value;
         }
 
         private void ParseBattery(string output)
@@ -2076,10 +2132,25 @@ namespace Xm5ControlUi
                 SetDseeState(HexByte(dsee.Groups[1].Value) == 1);
             }
 
-            var connection = Regex.Match(output, @"payload:\s*E7\s+00\s+([0-9A-F]{2})", RegexOptions.IgnoreCase);
-            if (connection.Success && connectionQualityLabel != null)
+            // Prefer the device information blob: it reports all three settings,
+            // where E7 00 collapses low latency and sound quality onto the same
+            // value. Fall back to E7 00 for models that do not return the blob.
+            var reported = Regex.Match(output, @"(?m)^connection quality:\s*(\S+)\s*$", RegexOptions.IgnoreCase);
+            if (reported.Success && connectionQualityLabel != null)
             {
-                SetConnectionQualityState(HexByte(connection.Groups[1].Value) == 0);
+                string mode = reported.Groups[1].Value;
+                if (mode.Equals("low-latency", StringComparison.OrdinalIgnoreCase)) SetConnectionQualityLowLatency();
+                else if (mode.Equals("quality", StringComparison.OrdinalIgnoreCase)) SetConnectionQualityState(true);
+                else if (mode.Equals("stability", StringComparison.OrdinalIgnoreCase)) SetConnectionQualityState(false);
+                else SetConnectionQualityState(null);
+            }
+            else
+            {
+                var connection = Regex.Match(output, @"payload:\s*E7\s+00\s+([0-9A-F]{2})", RegexOptions.IgnoreCase);
+                if (connection.Success && connectionQualityLabel != null)
+                {
+                    SetConnectionQualityState(HexByte(connection.Groups[1].Value) == 0);
+                }
             }
 
             var speak = Regex.Match(output, @"payload:\s*F7\s+02\s+([0-9A-F]{2})\s+([0-9A-F]{2})", RegexOptions.IgnoreCase);
@@ -2604,6 +2675,11 @@ namespace Xm5ControlUi
 
         private async Task SetConnectionQualityAsync(bool prioritizeSound)
         {
+            if (lowLatencyActive)
+            {
+                lastActionLabel.Text = LowLatencyHint;
+                return;
+            }
             SetConnectionQualityState(prioritizeSound);
             lastActionLabel.Text = prioritizeSound ? "Connection quality set to quality" : "Connection quality set to stability";
             await RunBackendAsync(WithDevice("raw \"E8 00 " + (prioritizeSound ? "00" : "01") + "\" --ack-only --timeout 1200"), "Setting connection quality");
