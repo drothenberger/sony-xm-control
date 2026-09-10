@@ -472,6 +472,73 @@ static void print_ncasm_state(const ncasm_state_t *st) {
     putchar('\n');
 }
 
+/*
+ * The codec is reported as a letter in the device information blob, and it
+ * follows the connection that is actually playing rather than a fixed link, so
+ * it changes as audio moves between multipoint devices.
+ */
+static const char *codec_text(char c) {
+    switch (c) {
+    case 'S': return "SBC";
+    case 'A': return "AAC";
+    case 'L': return "LDAC";
+    case 'C': return "LC3 (LE Audio)";
+    default: return NULL;
+    }
+}
+
+/*
+ * Connection quality, also a letter in the device information blob. This is the
+ * only field that distinguishes all three settings the headset offers: the
+ * NCASM-era "E6 00" query reports 0 both for prioritised sound quality and for
+ * low latency, so it cannot express the latter at all.
+ */
+static const char *conn_quality_text(char c) {
+    switch (c) {
+    case 'S': return "quality";
+    case 'C': return "stability";
+    case '-': return "low-latency";
+    default: return NULL;
+    }
+}
+
+/* Read the one-letter value of "<key>":"X" out of the JSON blob. */
+static bool json_letter(const uint8_t *json, size_t len, const char *key, char *out) {
+    size_t key_len = strlen(key);
+
+    for (size_t i = 0; i + key_len < len; i++) {
+        if (memcmp(json + i, key, key_len) == 0) {
+            *out = (char)json[i + key_len];
+            return true;
+        }
+    }
+    return false;
+}
+
+static void print_device_info(const uint8_t *json, size_t len) {
+    char value;
+
+    if (json_letter(json, len, "\"codec\":\"", &value)) {
+        const char *name = codec_text(value);
+        if (name) {
+            printf("codec: %s\n", name);
+        } else {
+            printf("codec: %c\n", value);
+        }
+    } else {
+        puts("codec: unknown");
+    }
+
+    if (json_letter(json, len, "\"cntQlty\":\"", &value)) {
+        const char *name = conn_quality_text(value);
+        if (name) {
+            printf("connection quality: %s\n", name);
+        } else {
+            printf("connection quality: %c\n", value);
+        }
+    }
+}
+
 static void print_known_payload(const mdr_frame_t *frame) {
     const uint8_t *p = frame->payload;
     size_t n = frame->payload_len;
@@ -496,6 +563,15 @@ static void print_known_payload(const mdr_frame_t *frame) {
     case 0x13:
     case 0x23:
     case 0x25:
+        /*
+         * 0x13 is also the reply to the device information request (12 00),
+         * which carries a JSON blob rather than battery levels. Without this the
+         * opening brace and quote decode as a 123% battery.
+         */
+        if (p[0] == 0x13 && n >= 4 && p[1] == 0x00 && p[2] == '{') {
+            print_device_info(p + 2, n - 2);
+            return;
+        }
         if (n >= 4 && p[1] == 0x00) {
             printf("battery: %u%% (%s)\n", p[2], charging_text(p[3]));
         } else if (n >= 6 && p[1] == 0x01) {
