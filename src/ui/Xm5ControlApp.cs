@@ -7,6 +7,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -286,6 +287,9 @@ namespace Xm5ControlUi
         private const int AutoDetectIntervalMs = 4000;
         private const int AutoStateRefreshIntervalMs = 15000;
         private const int LiveEqDebounceMs = 260;
+        private const int EqRowHeight = 33;
+        private const int EqBaselineRows = 3;
+        private const int EqExtraRowPadding = 12;
         private const int BackendCommandPaceMs = 450;
         private const string StateBatchTail = "D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05\" --timeout 1800";
 
@@ -394,7 +398,16 @@ namespace Xm5ControlUi
         private ChoiceDropdown eqPresetBox;
         private SliderControl[] eqSliders;
         private Label[] eqValueLabels;
+        private Label[] eqNameLabels;
         private EqCurveControl eqCurve;
+        private CardPanel eqCard;
+        private PillButton eqFlatButton;
+        private PillButton eqCopyPresetButton;
+        private EqProfile eqProfile = EqProfile.Legacy6Band();
+        private int baseMinimumHeight;
+        private int eqAppliedExtraHeight;
+        private int eqPendingBandCount;
+        private bool eqLayoutKnown;
         private PictureBox heroImageBox;
         private int currentEqPreset = 0xA0;
         private bool updatingEqUi;
@@ -442,6 +455,7 @@ namespace Xm5ControlUi
             // The noise control card is a fixed-height row and the equalizer card
             // takes what is left, so these grew with the auto ambient sound row.
             MinimumSize = new Size(1180, 964);
+            baseMinimumHeight = MinimumSize.Height;
             Size = new Size(1380, 1044);
             if (startMinimizedToTray)
             {
@@ -480,6 +494,7 @@ namespace Xm5ControlUi
 
             Resize += (s, e) =>
             {
+                if (eqPendingBandCount > 0 && WindowState == FormWindowState.Normal) EnsureHeightForBands(eqPendingBandCount);
                 if (!IsClosing && hasShownOnce && WindowState == FormWindowState.Minimized && minimizeToTray)
                 {
                     ConcealMainWindow(removeFromTaskbar: true);
@@ -938,6 +953,7 @@ namespace Xm5ControlUi
 
         private void BuildEqualizer(CardPanel parent)
         {
+            eqCard = parent;
             AddTitle(parent, "Equalizer", 18);
 
             eqCardSummaryLabel = new Label
@@ -974,22 +990,7 @@ namespace Xm5ControlUi
                 Location = new Point(CardInset, 184),
                 Width = 188
             };
-            eqPresetBox.Items.AddRange(new object[]
-            {
-                new EqPresetChoice("Off", 0x00),
-                new EqPresetChoice("Bright", 0x10),
-                new EqPresetChoice("Excited", 0x11),
-                new EqPresetChoice("Mellow", 0x12),
-                new EqPresetChoice("Relaxed", 0x13),
-                new EqPresetChoice("Vocal", 0x14),
-                new EqPresetChoice("Treble", 0x15),
-                new EqPresetChoice("Bass", 0x16),
-                new EqPresetChoice("Speech", 0x17),
-                new EqPresetChoice("Manual", 0xA0),
-                new EqPresetChoice("User 1", 0xA1),
-                new EqPresetChoice("User 2", 0xA2)
-            });
-            eqPresetBox.SelectedIndex = 9;
+            PopulateEqPresetBox();
             eqPresetBox.SelectedIndexChanged += async (s, e) =>
             {
                 if (updatingEqUi) return;
@@ -1003,43 +1004,89 @@ namespace Xm5ControlUi
             flat.Click += async (s, e) => await SetEqualizerFlatAsync();
             parent.Controls.Add(flat);
 
-            var savePreset = new PillButton("Save preset", blue, bluePressed);
-            savePreset.Click += (s, e) => ShowEqualizerSaveMenu(savePreset);
-            parent.Controls.Add(savePreset);
+            // Not "Save": every slider move is already written to the headset.
+            // This copies the curve on screen into one of the two custom slots.
+            var copyPreset = new PillButton("Copy to...", blue, bluePressed);
+            copyPreset.Click += (s, e) => ShowEqualizerCopyMenu(copyPreset);
+            parent.Controls.Add(copyPreset);
 
-            eqSliders = new SliderControl[6];
-            eqValueLabels = new Label[6];
-            var eqNameLabels = new Label[6];
-            string[] names = { "Clear Bass", "400", "1k", "2.5k", "6.3k", "16k" };
-            for (int i = 0; i < eqSliders.Length; i++)
+            eqFlatButton = flat;
+            eqCopyPresetButton = copyPreset;
+            RebuildEqualizerBands();
+
+            parent.Resize += (s, e) => LayoutEqualizer();
+        }
+
+        private void PopulateEqPresetBox()
+        {
+            if (eqPresetBox == null) return;
+            updatingEqUi = true;
+            try
+            {
+                eqPresetBox.Items.Clear();
+                foreach (var choice in eqProfile.Presets) eqPresetBox.Items.Add(choice);
+                if (!SelectEqPreset(currentEqPreset) && eqPresetBox.Items.Count > 0)
+                {
+                    eqPresetBox.SelectedIndex = 0;
+                }
+            }
+            finally
+            {
+                updatingEqUi = false;
+            }
+        }
+
+        // The sliders are rebuilt whenever the device reports a band layout that
+        // differs from the one on screen, so the count and the labels always come
+        // from the capability reply rather than from a hardcoded six.
+        private void RebuildEqualizerBands()
+        {
+            if (eqCard == null) return;
+
+            if (eqSliders != null)
+            {
+                for (int i = 0; i < eqSliders.Length; i++)
+                {
+                    DisposeBandControl(eqSliders[i]);
+                    if (eqValueLabels != null && i < eqValueLabels.Length) DisposeBandControl(eqValueLabels[i]);
+                    if (eqNameLabels != null && i < eqNameLabels.Length) DisposeBandControl(eqNameLabels[i]);
+                }
+            }
+
+            int count = eqProfile.BandCount;
+            eqSliders = new SliderControl[count];
+            eqValueLabels = new Label[count];
+            eqNameLabels = new Label[count];
+
+            for (int i = 0; i < count; i++)
             {
                 var name = new Label
                 {
-                    Text = names[i],
-                    ForeColor = i == 0 ? blue : subdued,
+                    Text = eqProfile.Labels[i],
+                    ForeColor = i == 0 && eqProfile.FirstBandIsClearBass ? blue : subdued,
                     Font = new Font("Segoe UI Semibold", 8.8f),
                     AutoEllipsis = true,
                     TextAlign = ContentAlignment.MiddleLeft
                 };
-                parent.Controls.Add(name);
+                eqCard.Controls.Add(name);
                 eqNameLabels[i] = name;
 
                 var value = new Label
                 {
-                    Text = "0",
+                    Text = eqProfile.FormatValue(eqProfile.Neutral),
                     ForeColor = ink,
                     Font = new Font("Segoe UI Semibold", 10f),
                     TextAlign = ContentAlignment.MiddleRight
                 };
-                parent.Controls.Add(value);
+                eqCard.Controls.Add(value);
                 eqValueLabels[i] = value;
 
                 var slider = new SliderControl
                 {
                     Minimum = 0,
-                    Maximum = 20,
-                    Value = 10,
-                    TickFrequency = 5,
+                    Maximum = eqProfile.MaxValue,
+                    Value = eqProfile.Neutral,
+                    TickFrequency = Math.Max(1, eqProfile.MaxValue / 4),
                     SmallChange = 1,
                     LargeChange = 2,
                     BackColor = card,
@@ -1050,47 +1097,94 @@ namespace Xm5ControlUi
                     CenteredFill = true
                 };
                 slider.ValueChanged += (s, e) => HandleEqualizerSliderChanged((SliderControl)s);
-                parent.Controls.Add(slider);
+                eqCard.Controls.Add(slider);
                 eqSliders[i] = slider;
             }
 
-            Action layout = () =>
+            if (eqCurve != null) eqCurve.SetProfile(eqProfile.Labels, eqProfile.MaxValue, eqProfile.FirstBandIsClearBass);
+            UpdateEqControlsEnabled();
+            EnsureHeightForBands(count);
+            LayoutEqualizer();
+        }
+
+        private void DisposeBandControl(Control control)
+        {
+            if (control == null) return;
+            if (eqCard != null) eqCard.Controls.Remove(control);
+            control.Dispose();
+        }
+
+        // Ten bands need five rows per column where six needed three. Raising the
+        // minimum alone is not enough: the default window is already taller than
+        // that, so the extra rows would still be clipped. Grow the window itself
+        // by the same delta, and track what has been applied so switching devices
+        // does not stack one allowance on top of another.
+        //
+        // Only while the window is Normal. Raising MinimumSize on a minimized
+        // window grows its 276x45 minimized bounds to the minimum, and WinForms
+        // then restores to that: starting in the tray came back at 1180 wide
+        // instead of 1380. The Resize handler applies it on restore instead.
+        private void EnsureHeightForBands(int bandCount)
+        {
+            if (baseMinimumHeight <= 0) return;
+            if (WindowState != FormWindowState.Normal)
             {
-                flat.Size = new Size(74, 34);
-                flat.Location = new Point(parent.Width - flat.Width - CardInset, 184);
-                savePreset.Size = new Size(116, 34);
-                savePreset.Location = new Point(flat.Left - savePreset.Width - 10, 184);
-                eqCardSummaryLabel.Width = Math.Max(260, parent.Width - (CardInset * 2));
-                eqCurve.Width = Math.Max(360, parent.Width - (CardInset * 2));
+                eqPendingBandCount = bandCount;
+                return;
+            }
+            eqPendingBandCount = 0;
+            int rowsPerColumn = (bandCount + 1) / 2;
+            int extra = rowsPerColumn > EqBaselineRows
+                ? ((rowsPerColumn - EqBaselineRows) * EqRowHeight) + EqExtraRowPadding
+                : 0;
+            if (extra == eqAppliedExtraHeight) return;
+
+            int delta = extra - eqAppliedExtraHeight;
+            eqAppliedExtraHeight = extra;
+            MinimumSize = new Size(MinimumSize.Width, baseMinimumHeight + extra);
+            if (delta > 0 && WindowState == FormWindowState.Normal) Height += delta;
+        }
+
+        private void LayoutEqualizer()
+        {
+            if (eqCard == null || eqSliders == null) return;
+            if (eqFlatButton == null || eqCopyPresetButton == null || eqPresetBox == null) return;
+
+            eqFlatButton.Size = new Size(74, 34);
+            eqFlatButton.Location = new Point(eqCard.Width - eqFlatButton.Width - CardInset, 184);
+            eqCopyPresetButton.Size = new Size(98, 34);
+            eqCopyPresetButton.Location = new Point(eqFlatButton.Left - eqCopyPresetButton.Width - 10, 184);
+            if (eqCardSummaryLabel != null) eqCardSummaryLabel.Width = Math.Max(260, eqCard.Width - (CardInset * 2));
+            if (eqCurve != null)
+            {
+                eqCurve.Width = Math.Max(360, eqCard.Width - (CardInset * 2));
                 eqCurve.Height = 112;
-                eqPresetBox.Location = new Point(CardInset, 184);
-                eqPresetBox.Width = Math.Max(150, Math.Min(220, savePreset.Left - CardInset - 12));
+            }
+            eqPresetBox.Location = new Point(CardInset, 184);
+            eqPresetBox.Width = Math.Max(150, Math.Min(220, eqCopyPresetButton.Left - CardInset - 12));
 
-                int top = 222;
-                int rowHeight = 33;
-                int gap = 18;
-                int valueWidth = 34;
-                int availableWidth = Math.Max(420, parent.Width - (CardInset * 2) - gap);
-                int columnWidth = Math.Max(236, availableWidth / 2);
-                for (int i = 0; i < eqSliders.Length; i++)
-                {
-                    int column = i < 3 ? 0 : 1;
-                    int row = i % 3;
-                    int x = CardInset + column * (columnWidth + gap);
-                    int y = top + row * rowHeight;
-                    int sliderLeft = x + 86;
-                    int sliderWidth = Math.Max(120, columnWidth - 126);
+            int top = 222;
+            int gap = 18;
+            int valueWidth = 34;
+            int rowsPerColumn = (eqSliders.Length + 1) / 2;
+            int availableWidth = Math.Max(420, eqCard.Width - (CardInset * 2) - gap);
+            int columnWidth = Math.Max(236, availableWidth / 2);
+            for (int i = 0; i < eqSliders.Length; i++)
+            {
+                int column = i / rowsPerColumn;
+                int row = i % rowsPerColumn;
+                int x = CardInset + column * (columnWidth + gap);
+                int y = top + row * EqRowHeight;
+                int sliderLeft = x + 86;
+                int sliderWidth = Math.Max(120, columnWidth - 126);
 
-                    eqNameLabels[i].Location = new Point(x, y + 4);
-                    eqNameLabels[i].Size = new Size(82, 22);
-                    eqSliders[i].Location = new Point(sliderLeft - 12, y - 1);
-                    eqSliders[i].Size = new Size(sliderWidth + 24, 30);
-                    eqValueLabels[i].Location = new Point(sliderLeft + sliderWidth + 6, y + 4);
-                    eqValueLabels[i].Size = new Size(valueWidth, 22);
-                }
-            };
-            parent.Resize += (s, e) => layout();
-            layout();
+                eqNameLabels[i].Location = new Point(x, y + 4);
+                eqNameLabels[i].Size = new Size(82, 22);
+                eqSliders[i].Location = new Point(sliderLeft - 12, y - 1);
+                eqSliders[i].Size = new Size(sliderWidth + 24, 30);
+                eqValueLabels[i].Location = new Point(sliderLeft + sliderWidth + 6, y + 4);
+                eqValueLabels[i].Size = new Size(valueWidth, 22);
+            }
         }
 
         private void BuildSettingsHub(CardPanel parent)
@@ -2121,10 +2215,14 @@ namespace Xm5ControlUi
                 SetMultipointState(HexByte(multipoint.Groups[1].Value) == 0);
             }
 
+            // Band layout first: the state below is interpreted against it.
+            ApplyEqualizerCapability(output);
+
             int eqPreset;
             int[] eqValues;
             if (TryParseEqualizerState(output, out eqPreset, out eqValues))
             {
+                AdoptEqLayoutFromState(eqValues);
                 if (HasEqValues(eqValues))
                 {
                     UpdateEqualizerUi(eqPreset, eqValues);
@@ -2133,8 +2231,8 @@ namespace Xm5ControlUi
                 {
                     currentEqPreset = eqPreset;
                     SelectEqPresetSilently(eqPreset);
-                    if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqPreset(eqPreset);
-                    if (eqCurve != null) eqCurve.SetState(eqPreset, null);
+                    if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = eqProfile.PresetName(eqPreset);
+                    if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(eqPreset), null);
                 }
             }
             else
@@ -2281,14 +2379,15 @@ namespace Xm5ControlUi
 
         private async Task SendEqualizerPresetAsync(int preset)
         {
+            if (!EqLayoutReady()) return;
             CancelLiveEqualizerApply();
             InvalidateEqualizerFetch();
             int[] cachedValues;
             bool hasCachedValues = TryGetCachedEqValues(preset, out cachedValues);
             currentEqPreset = preset;
-            string label = hasCachedValues ? FormatEqSummary(preset, cachedValues) : FormatEqPreset(preset);
+            string label = hasCachedValues ? FormatEqSummary(preset, cachedValues) : eqProfile.PresetName(preset);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = label;
-            if (eqCurve != null) eqCurve.SetState(preset, cachedValues);
+            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(preset), cachedValues);
             if (hasCachedValues) UpdateEqualizerUi(preset, cachedValues);
             lastActionLabel.Text = "Equalizer preset updating";
 
@@ -2306,6 +2405,7 @@ namespace Xm5ControlUi
             int[] responseValues;
             if (TryParseEqualizerState(output, out responsePreset, out responseValues) && responsePreset == preset)
             {
+                AdoptEqLayoutFromState(responseValues);
                 if (HasEqValues(responseValues))
                 {
                     UpdateEqualizerUi(responsePreset, responseValues);
@@ -2326,14 +2426,15 @@ namespace Xm5ControlUi
             lastActionLabel.Text = "Equalizer preset updated";
         }
 
-        private async Task SaveEqualizerUserPresetAsync(int preset)
+        private async Task CopyEqualizerToPresetAsync(int preset)
         {
+            if (!EqLayoutReady()) return;
             if (preset != 0xA1 && preset != 0xA2) return;
             CancelLiveEqualizerApply();
             InvalidateEqualizerFetch();
             int[] values = CurrentEqValues();
-            string presetName = FormatEqPreset(preset);
-            lastActionLabel.Text = "Saving " + presetName;
+            string presetName = eqProfile.PresetName(preset);
+            lastActionLabel.Text = "Copying to " + presetName;
 
             string payload = FormatEqualizerPayload(preset, values);
             var output = await RunBackendSilentAsync(WithDevice("raw \"" + payload + "\" --ack-only --timeout 1200"));
@@ -2341,7 +2442,7 @@ namespace Xm5ControlUi
             if (output.Contains("Could not open"))
             {
                 SetStatus("Device not reachable", red);
-                lastActionLabel.Text = presetName + " not saved";
+                lastActionLabel.Text = "Not copied to " + presetName;
                 return;
             }
 
@@ -2349,11 +2450,11 @@ namespace Xm5ControlUi
             currentEqPreset = preset;
             SelectEqPresetSilently(preset);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
-            if (eqCurve != null) eqCurve.SetState(preset, values);
-            lastActionLabel.Text = presetName + " saved";
+            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(preset), values);
+            lastActionLabel.Text = "Copied to " + presetName;
         }
 
-        private void ShowEqualizerSaveMenu(Control anchor)
+        private void ShowEqualizerCopyMenu(Control anchor)
         {
             if (anchor == null || anchor.IsDisposed) return;
             var menu = new ContextMenuStrip
@@ -2363,8 +2464,8 @@ namespace Xm5ControlUi
                 ShowImageMargin = false,
                 Padding = new Padding(4)
             };
-            AddEqualizerSaveMenuItem(menu, "Save to User 1", 0xA1);
-            AddEqualizerSaveMenuItem(menu, "Save to User 2", 0xA2);
+            AddEqualizerCopyMenuItem(menu, "Copy to " + eqProfile.PresetName(0xA1), 0xA1);
+            AddEqualizerCopyMenuItem(menu, "Copy to " + eqProfile.PresetName(0xA2), 0xA2);
             menu.Closed += (s, e) => DisposeContextMenuLater(menu);
             try
             {
@@ -2376,14 +2477,14 @@ namespace Xm5ControlUi
             }
         }
 
-        private void AddEqualizerSaveMenuItem(ContextMenuStrip menu, string text, int preset)
+        private void AddEqualizerCopyMenuItem(ContextMenuStrip menu, string text, int preset)
         {
             var item = new ToolStripMenuItem(text)
             {
                 BackColor = Color.FromArgb(36, 38, 42),
                 ForeColor = ink
             };
-            item.Click += async (s, e) => await RunUiTaskAsync(() => SaveEqualizerUserPresetAsync(preset));
+            item.Click += async (s, e) => await RunUiTaskAsync(() => CopyEqualizerToPresetAsync(preset));
             menu.Items.Add(item);
         }
 
@@ -2411,6 +2512,7 @@ namespace Xm5ControlUi
             int preset;
             int[] values;
             if (fetchGeneration != eqFetchGeneration || !TryParseEqualizerState(output, out preset, out values)) return;
+            AdoptEqLayoutFromState(values);
             if (expectedPreset >= 0 && preset != expectedPreset) return;
             if (!HasEqValues(values)) return;
             UpdateEqualizerUi(preset, values);
@@ -2418,20 +2520,17 @@ namespace Xm5ControlUi
 
         private async Task SendEqualizerCurrentAsync(bool quiet)
         {
-            if (eqSliders == null || eqSliders.Length != 6) return;
+            if (!EqLayoutReady()) return;
+            if (eqSliders == null || eqSliders.Length != eqProfile.BandCount) return;
             InvalidateEqualizerFetch();
             var choice = eqPresetBox != null ? eqPresetBox.SelectedItem as EqPresetChoice : null;
             int preset = choice != null ? choice.Value : currentEqPreset;
-            int[] values = new int[6];
-            for (int i = 0; i < values.Length; i++)
-            {
-                values[i] = Math.Max(0, Math.Min(20, eqSliders[i].Value));
-            }
+            int[] values = CurrentEqValues();
 
             currentEqPreset = preset;
             CacheEqValues(preset, values);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
-            if (eqCurve != null) eqCurve.SetState(preset, values);
+            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(preset), values);
             lastActionLabel.Text = quiet ? "Equalizer updating" : "Equalizer applied";
 
             string payload = FormatEqualizerPayload(preset, values);
@@ -2457,22 +2556,26 @@ namespace Xm5ControlUi
             await RunBackendAsync(WithDevice("raw \"" + payload + "\" --ack-only --timeout 1200"), "Setting equalizer");
         }
 
-        private static string FormatEqualizerPayload(int preset, int[] values)
+        // The device stores whatever it is sent without range-checking it, so every
+        // value is clamped here rather than relying on the headset to reject it.
+        private string FormatEqualizerPayload(int preset, int[] values)
         {
-            return string.Format(
-                "58 00 {0:X2} 06 {1:X2} {2:X2} {3:X2} {4:X2} {5:X2} {6:X2}",
-                preset,
-                values[0],
-                values[1],
-                values[2],
-                values[3],
-                values[4],
-                values[5]);
+            var text = new StringBuilder();
+            text.AppendFormat("58 00 {0:X2} {1:X2}", preset, eqProfile.BandCount);
+            for (int i = 0; i < eqProfile.BandCount; i++)
+            {
+                int value = values != null && i < values.Length ? values[i] : eqProfile.Neutral;
+                text.AppendFormat(" {0:X2}", eqProfile.Clamp(value));
+            }
+            return text.ToString();
         }
 
-        private static string FormatEqualizerPresetPayload(int preset)
+        // Selecting a preset without touching the band values. The WF-1000XM6 does
+        // not answer the 6-band form (58 00 <preset> 00) at all and uses inquired
+        // type 04 instead; sending band values there would force it to Manual.
+        private string FormatEqualizerPresetPayload(int preset)
         {
-            return string.Format("58 00 {0:X2} 00", preset);
+            return string.Format(eqProfile.PresetsUseType04 ? "58 04 {0:X2} 00" : "58 00 {0:X2} 00", preset);
         }
 
         private void ScheduleLiveEqualizerApply()
@@ -2517,30 +2620,41 @@ namespace Xm5ControlUi
 
         private async Task SetEqualizerFlatAsync()
         {
+            if (!EqLayoutReady()) return;
             CancelLiveEqualizerApply();
-            if (eqSliders != null) ResetEqSliders();
-            if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = "Manual / Flat";
+            // Flattening is an edit like any other, so it lands in the slot that is
+            // already selected rather than dragging the user back to Manual.
+            int target = EqEditTarget();
+            if (eqSliders != null) ResetEqSliders(target);
             lastActionLabel.Text = "Equalizer set to flat";
-            await RunBackendAsync(WithDevice("raw \"58 00 A0 06 0A 0A 0A 0A 0A 0A\" --ack-only --timeout 1200"), "Setting equalizer");
+            string payload = FormatEqualizerPayload(target, FlatEqValues());
+            await RunBackendAsync(WithDevice("raw \"" + payload + "\" --ack-only --timeout 1200"), "Setting equalizer");
         }
 
-        private void ResetEqSliders()
+        private int[] FlatEqValues()
+        {
+            var values = new int[eqProfile.BandCount];
+            for (int i = 0; i < values.Length; i++) values[i] = eqProfile.Neutral;
+            return values;
+        }
+
+        private void ResetEqSliders(int target)
         {
             if (eqSliders == null) return;
             updatingEqUi = true;
             try
             {
-                currentEqPreset = 0xA0;
-                SelectEqPreset(0xA0);
+                currentEqPreset = target;
+                SelectEqPreset(target);
                 for (int i = 0; i < eqSliders.Length; i++)
                 {
-                    eqSliders[i].Value = 10;
-                    if (eqValueLabels != null && eqValueLabels[i] != null) eqValueLabels[i].Text = FormatEqValue(10);
+                    eqSliders[i].Value = eqProfile.Neutral;
+                    if (eqValueLabels != null && eqValueLabels[i] != null) eqValueLabels[i].Text = eqProfile.FormatValue(eqProfile.Neutral);
                 }
-                if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = "Manual / Flat";
-                int[] flatValues = new int[] { 10, 10, 10, 10, 10, 10 };
-                CacheEqValues(0xA0, flatValues);
-                if (eqCurve != null) eqCurve.SetState(0xA0, flatValues);
+                if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = eqProfile.PresetName(target) + " / Flat";
+                int[] flatValues = FlatEqValues();
+                CacheEqValues(target, flatValues);
+                if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(target), flatValues);
                 lastActionLabel.Text = "Equalizer flattened";
             }
             finally
@@ -2554,18 +2668,18 @@ namespace Xm5ControlUi
             currentEqPreset = preset;
             CacheEqValues(preset, values);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
-            if (eqCurve != null) eqCurve.SetState(preset, values);
-            if (eqSliders == null || values == null || values.Length < 6) return;
+            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(preset), values);
+            if (eqSliders == null || !HasEqValues(values)) return;
 
             updatingEqUi = true;
             try
             {
                 SelectEqPreset(preset);
-                for (int i = 0; i < 6; i++)
+                for (int i = 0; i < eqSliders.Length; i++)
                 {
-                    int value = Math.Max(0, Math.Min(20, values[i]));
+                    int value = eqProfile.Clamp(values[i]);
                     eqSliders[i].Value = value;
-                    if (eqValueLabels != null && eqValueLabels[i] != null) eqValueLabels[i].Text = FormatEqValue(value);
+                    if (eqValueLabels != null && eqValueLabels[i] != null) eqValueLabels[i].Text = eqProfile.FormatValue(value);
                 }
             }
             finally
@@ -2574,18 +2688,19 @@ namespace Xm5ControlUi
             }
         }
 
-        private void SelectEqPreset(int preset)
+        private bool SelectEqPreset(int preset)
         {
-            if (eqPresetBox == null) return;
+            if (eqPresetBox == null) return false;
             for (int i = 0; i < eqPresetBox.Items.Count; i++)
             {
                 var choice = eqPresetBox.Items[i] as EqPresetChoice;
                 if (choice != null && choice.Value == preset)
                 {
                     eqPresetBox.SelectedIndex = i;
-                    return;
+                    return true;
                 }
             }
+            return false;
         }
 
         private void SelectEqPresetSilently(int preset)
@@ -2603,10 +2718,10 @@ namespace Xm5ControlUi
 
         private int[] CurrentEqValues()
         {
-            int[] values = new int[6];
+            int[] values = new int[eqProfile.BandCount];
             for (int i = 0; i < values.Length; i++)
             {
-                values[i] = eqSliders != null && i < eqSliders.Length && eqSliders[i] != null ? eqSliders[i].Value : 10;
+                values[i] = eqSliders != null && i < eqSliders.Length && eqSliders[i] != null ? eqSliders[i].Value : eqProfile.Neutral;
             }
             return values;
         }
@@ -2616,58 +2731,196 @@ namespace Xm5ControlUi
             int index = eqSliders == null ? -1 : Array.IndexOf(eqSliders, changed);
             if (index >= 0 && eqValueLabels != null && index < eqValueLabels.Length && eqValueLabels[index] != null)
             {
-                eqValueLabels[index].Text = FormatEqValue(changed.Value);
+                eqValueLabels[index].Text = eqProfile.FormatValue(changed.Value);
             }
             if (updatingEqUi) return;
 
-            int[] values = currentEqPreset == 0xA0 ? CurrentEqValues() : ResolveEqValuesForManualEdit(currentEqPreset);
-            if (index >= 0 && index < values.Length) values[index] = Math.Max(0, Math.Min(20, changed.Value));
+            int target = EqEditTarget();
+            int[] values = currentEqPreset == target ? CurrentEqValues() : ResolveEqValuesForEdit(currentEqPreset);
+            if (index >= 0 && index < values.Length) values[index] = eqProfile.Clamp(changed.Value);
 
-            currentEqPreset = 0xA0;
-            SelectEqPresetSilently(0xA0);
-            CacheEqValues(0xA0, values);
-            if (eqCurve != null) eqCurve.SetState(0xA0, values);
-            if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(0xA0, values);
+            currentEqPreset = target;
+            SelectEqPresetSilently(target);
+            CacheEqValues(target, values);
+            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(target), values);
+            if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(target, values);
             lastActionLabel.Text = "Equalizer updating";
             ScheduleLiveEqualizerApply();
         }
 
-        private int[] ResolveEqValuesForManualEdit(int preset)
+        // Manual and the two custom slots hold whatever the user dials in, so an
+        // edit stays where it already is. Every other preset is fixed, and editing
+        // one moves the curve into Manual instead — matching Sound Connect, and
+        // leaving the custom slots actually editable rather than stuck at flat.
+        private static bool IsStorableEqPreset(int preset)
+        {
+            return preset == 0xA0 || preset == 0xA1 || preset == 0xA2;
+        }
+
+        private int EqEditTarget()
+        {
+            return IsStorableEqPreset(currentEqPreset) ? currentEqPreset : 0xA0;
+        }
+
+        private int[] ResolveEqValuesForEdit(int preset)
         {
             int[] cachedValues;
             if (TryGetCachedEqValues(preset, out cachedValues)) return cachedValues;
             return CurrentEqValues();
         }
 
+        private const string PayloadPattern = @"payload:\s*((?:[0-9A-F]{2}\s+)*[0-9A-F]{2})";
+
+        private static int[] ParseHexBytes(string text)
+        {
+            string[] parts = Regex.Split(text.Trim(), @"\s+");
+            var bytes = new int[parts.Length];
+            for (int i = 0; i < parts.Length; i++) bytes[i] = HexByte(parts[i]);
+            return bytes;
+        }
+
+        // Reads whatever band count the device reports instead of requiring six.
+        // Both inquired types carry the same shape, and a set on type 04 answers
+        // with 59 rather than 57, so all four combinations are accepted. A reply
+        // with a band count of zero is preset-only and carries no values.
         private bool TryParseEqualizerState(string output, out int preset, out int[] values)
         {
             preset = 0;
             values = null;
+            bool found = false;
+            bool haveBands = false;
 
-            var eqParam = Regex.Match(output, @"payload:\s*(?:57|59)\s+00\s+([0-9A-F]{2})\s+06\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})\s+([0-9A-F]{2})", RegexOptions.IgnoreCase);
-            if (eqParam.Success)
+            foreach (Match payload in Regex.Matches(output, PayloadPattern, RegexOptions.IgnoreCase))
             {
-                preset = HexByte(eqParam.Groups[1].Value);
-                values = new int[6];
-                for (int i = 0; i < values.Length; i++) values[i] = HexByte(eqParam.Groups[i + 2].Value);
-                return true;
+                int[] bytes = ParseHexBytes(payload.Groups[1].Value);
+                if (bytes.Length < 4) continue;
+                if (bytes[0] != 0x57 && bytes[0] != 0x59) continue;
+                if (bytes[1] != 0x00 && bytes[1] != 0x04) continue;
+
+                int count = bytes[3];
+                if (count == 0)
+                {
+                    if (!haveBands)
+                    {
+                        preset = bytes[2];
+                        values = null;
+                        found = true;
+                    }
+                    continue;
+                }
+
+                if (bytes.Length < 4 + count) continue;
+                preset = bytes[2];
+                values = new int[count];
+                for (int i = 0; i < count; i++) values[i] = bytes[4 + i];
+                found = true;
+                haveBands = true;
             }
 
-            var eqPresetOnly = Regex.Match(output, @"payload:\s*(?:57|59)\s+00\s+([0-9A-F]{2})\s+00\b", RegexOptions.IgnoreCase);
-            if (eqPresetOnly.Success)
+            return found;
+        }
+
+        // 5B 00 <band count>, then one 3-byte group per band: a constant 01
+        // followed by the centre frequency as a 16-bit big-endian value. There is
+        // no range or step field anywhere in the reply.
+        private bool TryParseEqualizerCapability(string output, out int bandCount, out int[] frequencies)
+        {
+            bandCount = 0;
+            frequencies = null;
+
+            foreach (Match payload in Regex.Matches(output, PayloadPattern, RegexOptions.IgnoreCase))
             {
-                preset = HexByte(eqPresetOnly.Groups[1].Value);
+                int[] bytes = ParseHexBytes(payload.Groups[1].Value);
+                if (bytes.Length < 3 || bytes[0] != 0x5B || bytes[1] != 0x00) continue;
+
+                int count = bytes[2];
+                if (count <= 0 || bytes.Length < 3 + (count * 3)) continue;
+
+                var freqs = new int[count];
+                for (int i = 0; i < count; i++)
+                {
+                    int at = 3 + (i * 3);
+                    freqs[i] = (bytes[at + 1] << 8) | bytes[at + 2];
+                }
+
+                bandCount = count;
+                frequencies = freqs;
                 return true;
             }
 
             return false;
         }
 
+        private void ApplyEqualizerCapability(string output)
+        {
+            int bandCount;
+            int[] frequencies;
+            if (!TryParseEqualizerCapability(output, out bandCount, out frequencies)) return;
+            AdoptEqProfile(EqProfile.FromCapability(bandCount, frequencies));
+        }
+
+        // The state reply carries the band count as well, so the layout does not
+        // depend on the capability reply alone. Whichever of the two arrives is
+        // enough to stop guessing; only the frequency labels need 5A 00.
+        private void AdoptEqLayoutFromState(int[] values)
+        {
+            if (values == null || values.Length <= 0) return;
+            AdoptEqProfile(EqProfile.FromCapability(values.Length, null));
+        }
+
+        private void AdoptEqProfile(EqProfile profile)
+        {
+            bool wasKnown = eqLayoutKnown;
+            eqLayoutKnown = true;
+
+            if (eqProfile.Matches(profile.BandCount, profile.Labels))
+            {
+                if (!wasKnown) UpdateEqControlsEnabled();
+                return;
+            }
+
+            // A band count we already trust is not overwritten by a reply that
+            // carries no frequencies: the capability labels are better than the
+            // placeholder ones the state reply can produce.
+            if (wasKnown && profile.BandCount == eqProfile.BandCount) return;
+
+            // Cached curves belong to the old band layout and cannot be remapped.
+            eqProfile = profile;
+            eqBandCache.Clear();
+            PopulateEqPresetBox();
+            RebuildEqualizerBands();
+        }
+
+        // Nothing may be written until the real layout is known: the default
+        // profile is a guess, and acting on it is what sends a six-band frame to
+        // a ten-band device.
+        private bool EqLayoutReady()
+        {
+            if (eqLayoutKnown) return true;
+            if (lastActionLabel != null) lastActionLabel.Text = "Equalizer waiting for device";
+            return false;
+        }
+
+        private void UpdateEqControlsEnabled()
+        {
+            bool ready = eqLayoutKnown;
+            if (eqSliders != null)
+            {
+                for (int i = 0; i < eqSliders.Length; i++)
+                {
+                    if (eqSliders[i] != null) eqSliders[i].Enabled = ready;
+                }
+            }
+            if (eqPresetBox != null) eqPresetBox.Enabled = ready;
+            if (eqFlatButton != null) eqFlatButton.Enabled = ready;
+            if (eqCopyPresetButton != null) eqCopyPresetButton.Enabled = ready;
+        }
+
         private void CacheEqValues(int preset, int[] values)
         {
             if (!HasEqValues(values)) return;
-            int[] copy = new int[6];
-            for (int i = 0; i < copy.Length; i++) copy[i] = Math.Max(0, Math.Min(20, values[i]));
+            int[] copy = new int[eqProfile.BandCount];
+            for (int i = 0; i < copy.Length; i++) copy[i] = eqProfile.Clamp(values[i]);
             eqBandCache[preset] = copy;
         }
 
@@ -2676,7 +2929,7 @@ namespace Xm5ControlUi
             int[] cached;
             if (eqBandCache.TryGetValue(preset, out cached) && HasEqValues(cached))
             {
-                values = new int[6];
+                values = new int[eqProfile.BandCount];
                 Array.Copy(cached, values, values.Length);
                 return true;
             }
@@ -2685,9 +2938,9 @@ namespace Xm5ControlUi
             return false;
         }
 
-        private static bool HasEqValues(int[] values)
+        private bool HasEqValues(int[] values)
         {
-            return values != null && values.Length >= 6;
+            return values != null && values.Length >= eqProfile.BandCount;
         }
 
         private void InvalidateEqualizerFetch()
@@ -3422,51 +3675,20 @@ namespace Xm5ControlUi
             }
         }
 
-        private static string FormatEqValue(int value)
+        // The 6-band models lead with Clear Bass, which is worth calling out by
+        // name. The 10-band layout has no such band, so the summary names the
+        // lowest frequency instead of inventing one.
+        // Clear Bass is a shelf control in its own right, so it earns a place in
+        // the summary next to the preset name. Where there is no Clear Bass the
+        // first band is just the lowest of many and says nothing useful on its
+        // own, so the preset name stands alone and the curve and sliders below
+        // carry the detail.
+        private string FormatEqSummary(int preset, int[] values)
         {
-            int centered = value - 10;
-            if (centered > 0) return "+" + centered;
-            return centered.ToString();
-        }
-
-        private static string FormatEqSummary(int preset, int[] values)
-        {
-            string presetName = FormatEqPreset(preset);
-            if (values == null || values.Length < 6) return presetName;
-            return presetName + " / Clear Bass " + FormatEqValue(values[0]);
-        }
-
-        private static string FormatEqPreset(int value)
-        {
-            switch (value)
-            {
-                case 0x00:
-                    return "Off";
-                case 0x10:
-                    return "Bright";
-                case 0x11:
-                    return "Excited";
-                case 0x12:
-                    return "Mellow";
-                case 0x13:
-                    return "Relaxed";
-                case 0x14:
-                    return "Vocal";
-                case 0x15:
-                    return "Treble";
-                case 0x16:
-                    return "Bass";
-                case 0x17:
-                    return "Speech";
-                case 0xA0:
-                    return "Manual";
-                case 0xA1:
-                    return "User 1";
-                case 0xA2:
-                    return "User 2";
-                default:
-                    return "0x" + value.ToString("X2");
-            }
+            string presetName = eqProfile.PresetName(preset);
+            if (!eqProfile.FirstBandIsClearBass) return presetName;
+            if (!HasEqValues(values)) return presetName;
+            return presetName + " / Clear Bass " + eqProfile.FormatValue(values[0]);
         }
 
         private static string FormatGeneralBoolean(int value)
@@ -3480,6 +3702,137 @@ namespace Xm5ControlUi
                 default:
                     return "0x" + value.ToString("X2");
             }
+        }
+    }
+
+    // Everything about the equalizer that varies by model, so the rest of the UI
+    // never hardcodes a band count again.
+    //
+    // The WF-1000XM6 reports ten octave bands (31 Hz to 16 kHz) over a 0-12 range
+    // centred on 6. The WH/WF-1000XM5 has Clear Bass plus five bands over 0-20
+    // centred on 10. The 5A 00 capability reply carries the band count and the
+    // frequencies but no range or step, so the range has to be keyed off the band
+    // count: 6 bands keeps the shipped XM5 behaviour, anything else is treated as
+    // the newer 0-12 layout.
+    internal sealed class EqProfile
+    {
+        public int BandCount { get; private set; }
+        public int MaxValue { get; private set; }
+        public bool FirstBandIsClearBass { get; private set; }
+        public string[] Labels { get; private set; }
+        // The XM6 does not answer the 6-band preset-only form (58 00 <preset> 00)
+        // at all; it selects presets on inquired type 04 instead.
+        public bool PresetsUseType04 { get; private set; }
+        public EqPresetChoice[] Presets { get; private set; }
+
+        public int Neutral { get { return MaxValue / 2; } }
+
+        public int Clamp(int value)
+        {
+            if (value < 0) return 0;
+            return value > MaxValue ? MaxValue : value;
+        }
+
+        public string FormatValue(int value)
+        {
+            int centered = Clamp(value) - Neutral;
+            return centered > 0 ? "+" + centered : centered.ToString();
+        }
+
+        public string PresetName(int preset)
+        {
+            foreach (var choice in Presets)
+            {
+                if (choice.Value == preset) return choice.Text;
+            }
+            return "0x" + preset.ToString("X2");
+        }
+
+        public bool Matches(int bandCount, string[] labels)
+        {
+            if (BandCount != bandCount || Labels.Length != labels.Length) return false;
+            for (int i = 0; i < labels.Length; i++)
+            {
+                if (!string.Equals(Labels[i], labels[i], StringComparison.Ordinal)) return false;
+            }
+            return true;
+        }
+
+        public static EqProfile Legacy6Band()
+        {
+            return new EqProfile
+            {
+                BandCount = 6,
+                MaxValue = 20,
+                FirstBandIsClearBass = true,
+                Labels = new[] { "Clear Bass", "400", "1k", "2.5k", "6.3k", "16k" },
+                PresetsUseType04 = false,
+                Presets = new[]
+                {
+                    new EqPresetChoice("Off", 0x00),
+                    new EqPresetChoice("Bright", 0x10),
+                    new EqPresetChoice("Excited", 0x11),
+                    new EqPresetChoice("Mellow", 0x12),
+                    new EqPresetChoice("Relaxed", 0x13),
+                    new EqPresetChoice("Vocal", 0x14),
+                    new EqPresetChoice("Treble", 0x15),
+                    new EqPresetChoice("Bass", 0x16),
+                    new EqPresetChoice("Speech", 0x17),
+                    new EqPresetChoice("Manual", 0xA0),
+                    new EqPresetChoice("User 1", 0xA1),
+                    new EqPresetChoice("User 2", 0xA2)
+                }
+            };
+        }
+
+        public static EqProfile FromCapability(int bandCount, int[] frequencies)
+        {
+            if (bandCount == 6) return Legacy6Band();
+
+            var labels = new string[bandCount];
+            for (int i = 0; i < bandCount; i++)
+            {
+                labels[i] = frequencies != null && i < frequencies.Length
+                    ? FormatFrequency(frequencies[i])
+                    : (i + 1).ToString();
+            }
+
+            return new EqProfile
+            {
+                BandCount = bandCount,
+                MaxValue = 12,
+                FirstBandIsClearBass = false,
+                Labels = labels,
+                PresetsUseType04 = true,
+                // Every id below was read back from a WF-1000XM6 with that preset
+                // selected in Sound Connect. The ids are grouped rather than
+                // consecutive — Game sits at 0x20 while the tone presets run
+                // 0x30-0x33 — so they are listed explicitly, not generated. The
+                // 0x10 block used by the 6-band profile is not this model's
+                // vocabulary and draws no response here.
+                //
+                // Order follows Sound Connect's own list, which shows Game after
+                // Soft despite the lower id.
+                Presets = new[]
+                {
+                    new EqPresetChoice("Off", 0x00),
+                    new EqPresetChoice("Heavy", 0x30),
+                    new EqPresetChoice("Clear", 0x31),
+                    new EqPresetChoice("Hard", 0x32),
+                    new EqPresetChoice("Soft", 0x33),
+                    new EqPresetChoice("Game", 0x20),
+                    new EqPresetChoice("Manual", 0xA0),
+                    new EqPresetChoice("Custom 1", 0xA1),
+                    new EqPresetChoice("Custom 2", 0xA2)
+                }
+            };
+        }
+
+        public static string FormatFrequency(int hz)
+        {
+            if (hz < 1000) return hz.ToString();
+            double k = hz / 1000.0;
+            return (k == Math.Floor(k) ? k.ToString("0") : k.ToString("0.#")) + "k";
         }
     }
 
@@ -4005,6 +4358,13 @@ namespace Xm5ControlUi
             Invalidate();
         }
 
+        internal void ClearItems()
+        {
+            items.Clear();
+            selectedIndex = -1;
+            Invalidate();
+        }
+
         internal object GetItem(int index)
         {
             return items[index];
@@ -4199,6 +4559,16 @@ namespace Xm5ControlUi
             public void AddRange(object[] values)
             {
                 foreach (object value in values) owner.AddItem(value);
+            }
+
+            public void Add(object value)
+            {
+                owner.AddItem(value);
+            }
+
+            public void Clear()
+            {
+                owner.ClearItems();
             }
         }
     }
@@ -4499,8 +4869,13 @@ namespace Xm5ControlUi
 
     internal sealed class EqCurveControl : Control
     {
-        private int preset = 0xA0;
-        private int[] values = new int[] { 10, 10, 10, 10, 10, 10 };
+        private string presetName = "Manual";
+        private string[] labels = { "400", "1k", "2.5k", "6.3k", "16k" };
+        private int maxValue = 20;
+        // The 6-band models plot only the five frequency bands: Clear Bass is a
+        // separate shelf and does not belong on the frequency curve.
+        private bool skipFirstBand = true;
+        private int[] values = { 10, 10, 10, 10, 10, 10 };
 
         public Color LineColor { get; set; }
         public Color BassColor { get; set; }
@@ -4518,17 +4893,35 @@ namespace Xm5ControlUi
             Font = new Font("Segoe UI", 8.6f);
         }
 
-        public void SetState(int presetValue, int[] bandValues)
+        public void SetProfile(string[] bandLabels, int bandMaxValue, bool firstBandIsClearBass)
         {
-            preset = presetValue;
-            int[] next = new int[6];
-            for (int i = 0; i < next.Length; i++)
-            {
-                int value = bandValues != null && i < bandValues.Length ? bandValues[i] : 10;
-                next[i] = Math.Max(0, Math.Min(20, value));
-            }
-            values = next;
+            maxValue = Math.Max(2, bandMaxValue);
+            skipFirstBand = firstBandIsClearBass;
+            int plotted = bandLabels == null ? 0 : Math.Max(0, bandLabels.Length - (skipFirstBand ? 1 : 0));
+            var next = new string[plotted];
+            for (int i = 0; i < plotted; i++) next[i] = bandLabels[i + (skipFirstBand ? 1 : 0)];
+            labels = next;
+            values = NormalizeValues(null, bandLabels == null ? 0 : bandLabels.Length);
             Invalidate();
+        }
+
+        public void SetState(string preset, int[] bandValues)
+        {
+            presetName = preset;
+            values = NormalizeValues(bandValues, labels.Length + (skipFirstBand ? 1 : 0));
+            Invalidate();
+        }
+
+        private int[] NormalizeValues(int[] bandValues, int count)
+        {
+            int neutral = maxValue / 2;
+            var next = new int[count];
+            for (int i = 0; i < count; i++)
+            {
+                int value = bandValues != null && i < bandValues.Length ? bandValues[i] : neutral;
+                next[i] = Math.Max(0, Math.Min(maxValue, value));
+            }
+            return next;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -4553,19 +4946,27 @@ namespace Xm5ControlUi
                 e.Graphics.DrawLine(zeroPen, plot.Left, mid, plot.Right, mid);
                 e.Graphics.DrawLine(gridPen, plot.Left, bottom, plot.Right, bottom);
 
-                TextRenderer.DrawText(e.Graphics, "+10", Font, new Rectangle(4, top - 8, 48, 18), MutedColor, TextFormatFlags.Right | TextFormatFlags.NoPadding);
+                int neutral = maxValue / 2;
+                TextRenderer.DrawText(e.Graphics, "+" + (maxValue - neutral), Font, new Rectangle(4, top - 8, 48, 18), MutedColor, TextFormatFlags.Right | TextFormatFlags.NoPadding);
                 TextRenderer.DrawText(e.Graphics, "0", Font, new Rectangle(4, mid - 8, 48, 18), MutedColor, TextFormatFlags.Right | TextFormatFlags.NoPadding);
-                TextRenderer.DrawText(e.Graphics, "-10", Font, new Rectangle(4, bottom - 18, 48, 18), MutedColor, TextFormatFlags.Right | TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(e.Graphics, "-" + neutral, Font, new Rectangle(4, bottom - 18, 48, 18), MutedColor, TextFormatFlags.Right | TextFormatFlags.NoPadding);
 
-                string[] labels = { "400", "1k", "2.5k", "6.3k", "16k" };
-                PointF[] points = new PointF[5];
+                int offset = skipFirstBand ? 1 : 0;
+                PointF[] points = new PointF[labels.Length];
+                // Ten labels in the width that held five: drop every other one
+                // rather than let them overlap into an unreadable smear.
+                int labelStep = labels.Length > 6 ? 2 : 1;
                 for (int i = 0; i < points.Length; i++)
                 {
                     float x = points.Length == 1 ? plot.Left : plot.Left + (plot.Width * i / (float)(points.Length - 1));
-                    float y = bottom - (plot.Height * values[i + 1] / 20f);
+                    int value = i + offset < values.Length ? values[i + offset] : neutral;
+                    float y = bottom - (plot.Height * value / (float)maxValue);
                     points[i] = new PointF(x, y);
                     e.Graphics.FillEllipse(pointBrush, x - 4, y - 4, 8, 8);
-                    TextRenderer.DrawText(e.Graphics, labels[i], Font, new Rectangle((int)x - 28, bottom + 2, 56, 18), MutedColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding);
+                    if (i % labelStep == 0)
+                    {
+                        TextRenderer.DrawText(e.Graphics, labels[i], Font, new Rectangle((int)x - 28, bottom + 2, 56, 18), MutedColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding);
+                    }
                 }
 
                 if (points.Length > 1)
@@ -4580,34 +4981,7 @@ namespace Xm5ControlUi
                     e.Graphics.DrawLines(linePen, points);
                 }
 
-                string presetName = FormatEqPreset(preset);
                 TextRenderer.DrawText(e.Graphics, presetName, new Font("Segoe UI Semibold", 9f), new Rectangle(plot.Left, 2, plot.Width, 22), ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            }
-        }
-
-        private static string FormatEqValue(int value)
-        {
-            int centered = value - 10;
-            return centered > 0 ? "+" + centered : centered.ToString();
-        }
-
-        private static string FormatEqPreset(int value)
-        {
-            switch (value)
-            {
-                case 0x00: return "Off";
-                case 0x10: return "Bright";
-                case 0x11: return "Excited";
-                case 0x12: return "Mellow";
-                case 0x13: return "Relaxed";
-                case 0x14: return "Vocal";
-                case 0x15: return "Treble";
-                case 0x16: return "Bass";
-                case 0x17: return "Speech";
-                case 0xA0: return "Manual";
-                case 0xA1: return "User 1";
-                case 0xA2: return "User 2";
-                default: return "0x" + value.ToString("X2");
             }
         }
 

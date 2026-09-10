@@ -18,8 +18,8 @@ Unofficial Windows controller for Sony 1000X headphones and earbuds.
 - Ambient sound level control
 - Voice (focus on voice) ambient mode
 - Auto ambient sound with Low/Standard/High sensitivity (WF-1000XM6)
-- Equalizer presets and live EQ band control
-- Clear Bass control
+- Equalizer presets and live EQ band control, 6-band or 10-band per device
+- Clear Bass control (6-band models)
 - DSEE Extreme Auto/Off
 - Bluetooth connection quality mode
 - Active codec display
@@ -89,6 +89,28 @@ which reports it as a letter: `S` is SBC, `A` is AAC and `L` is LDAC. It follows
 whichever connection last played audio rather than a fixed link, so on a
 multipoint setup it changes as audio moves between devices, and it keeps the
 last value once playback stops.
+
+The equalizer band layout is read from the device rather than assumed. `5A 00`
+returns `5B 00 <count>` followed by one `01 <freq16>` group per band: six bands
+on the WH/WF-1000XM5, ten on the WF-1000XM6. Six-band devices keep the Clear
+Bass shelf and a 0-20 range centred on 10; ten-band devices have no Clear Bass
+and run 0-12 centred on 6. The capability reply carries no range or step field,
+so the range is keyed off the band count. The headset stores out-of-range values
+verbatim rather than rejecting them, so values are clamped before being sent.
+
+Presets are selected with inquired type `04` (`58 04 <preset> 00`) — the
+preset-only form `58 00 <preset> 00` used by six-band devices draws no response
+on the WF-1000XM6. Writing band values with `58 00` always coerces the preset to
+Manual, so editing a fixed preset moves the curve into Manual, while Manual and
+the two custom slots keep whatever is dialled into them.
+
+Preset ids differ by model. The WF-1000XM6 does not answer the `0x10` block the
+older models use, and offers these instead:
+
+```text
+Off 0x00   Heavy 0x30   Clear 0x31   Hard 0x32   Soft 0x33
+Game 0x20  Manual 0xA0  Custom 1 0xA1   Custom 2 0xA2
+```
 
 Useful when adding support for a new model:
 
