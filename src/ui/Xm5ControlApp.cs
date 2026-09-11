@@ -399,6 +399,7 @@ namespace Xm5ControlUi
         // most of them do - does not redraw it.
         private string trayIconTextDrawn;
         private bool trayIconDimDrawn;
+        private bool trayIconPausedDrawn;
         private bool trayIconApplied;
         private string trayTooltipApplied;
         private bool autoDetectRunning;
@@ -1608,7 +1609,11 @@ namespace Xm5ControlUi
             // tray meter is why the phone app cannot connect. That has to be
             // undoable from the tray itself, without opening the window and
             // taking the channel all over again to do it.
-            trayMeterPauseItem = new ToolStripMenuItem("Pause the sound level meter");
+            // Named for exactly when it takes effect. Pausing has no effect
+            // while the window is open, because the state refresh is holding
+            // the control channel every fifteen seconds regardless and the
+            // meter stopping would free nothing.
+            trayMeterPauseItem = new ToolStripMenuItem("Pause tray sound level when minimized");
             trayMeterPauseItem.CheckOnClick = false;
             trayMeterPauseItem.Click += (s, e) => ToggleTrayMeterPaused();
             trayMeterPauseItem.Available = trayMeterEnabled;
@@ -1667,7 +1672,11 @@ namespace Xm5ControlUi
         private string TrayTitle()
         {
             string title = AppTitle();
-            if (trayMeterEnabled && trayMeterDigits != null)
+            if (TrayMeterPausedNow)
+            {
+                title += " - paused";
+            }
+            else if (trayMeterEnabled && trayMeterDigits != null)
             {
                 title += trayMeterDigits == NoSoundPressureText
                     ? " - nothing playing"
@@ -2595,23 +2604,18 @@ namespace Xm5ControlUi
         // pause item, the headset going away - comes through here.
         private void RefreshTrayMeter()
         {
-            // Dimmed digits mean "this number is no longer being refreshed".
-            // Staleness is the general test - a reading is overdue - and the
-            // two cases where that is known before the clock proves it are
-            // named outright, so the icon reacts to them at once instead of
-            // four seconds later.
+            // Dimmed digits mean one thing only: this number is no longer being
+            // refreshed and something is wrong. Pausing is not dimmed, because
+            // it is not a fault - it is the user having asked for exactly this,
+            // and it gets its own shape below so the two cannot be confused.
             //
-            // Pausing is deliberately not one of them on its own: with the
-            // window open the stream keeps running whatever the tray menu says,
-            // so the digits really are live and dimming them would be a lie.
-            // The tick mark on the menu item is what shows the pause is armed.
+            // Staleness is the general test, a reading being overdue. Locking
+            // is named outright because it is known before the clock proves it.
             //
             // Digits are left on screen rather than blanked. The last known
             // level still says more than nothing, and blanking would claim the
             // audio had stopped, which is not what any of this knows.
-            trayMeterDigitsDim = meterStale
-                || sessionLocked
-                || (trayMeterPaused && !WindowIsShowing);
+            trayMeterDigitsDim = meterStale || sessionLocked;
             ApplyTrayIcon();
             ApplyTrayTooltip();
         }
@@ -2631,11 +2635,13 @@ namespace Xm5ControlUi
         {
             if (trayIcon == null || trayCleanupStarted) return;
 
+            bool paused = TrayMeterPausedNow;
             string text = trayMeterEnabled ? trayMeterDigits : null;
             bool dim = trayMeterDigitsDim;
-            if (trayIconApplied && text == trayIconTextDrawn && (text == null || dim == trayIconDimDrawn)) return;
+            if (trayIconApplied && paused == trayIconPausedDrawn && text == trayIconTextDrawn &&
+                (text == null || dim == trayIconDimDrawn)) return;
 
-            if (text == null)
+            if (text == null && !paused)
             {
                 trayIcon.Icon = notificationIcon;
                 DisposeTrayMeterIcon();
@@ -2645,7 +2651,12 @@ namespace Xm5ControlUi
                 Icon rendered;
                 try
                 {
-                    rendered = RenderDigitsIcon(text, dim ? Color.FromArgb(128, 134, 142) : Color.FromArgb(226, 230, 235));
+                    // Paused draws at full strength: it is a state the user
+                    // chose, not a reading that has gone bad, and keeping it
+                    // bright is a second thing separating it from stale digits.
+                    rendered = paused
+                        ? RenderPausedIcon(Color.FromArgb(226, 230, 235))
+                        : RenderDigitsIcon(text, dim ? Color.FromArgb(128, 134, 142) : Color.FromArgb(226, 230, 235));
                 }
                 catch
                 {
@@ -2662,7 +2673,17 @@ namespace Xm5ControlUi
 
             trayIconTextDrawn = text;
             trayIconDimDrawn = dim;
+            trayIconPausedDrawn = paused;
             trayIconApplied = true;
+        }
+
+        // Pausing only takes effect once the window is out of the way, so this
+        // is also the only time the icon should claim to be paused. With the
+        // window open the reading is live and saying otherwise would put the
+        // tray and the window in disagreement about the same number.
+        private bool TrayMeterPausedNow
+        {
+            get { return trayMeterEnabled && trayMeterPaused && !WindowIsShowing; }
         }
 
         private void DisposeTrayMeterIcon()
@@ -4286,6 +4307,39 @@ namespace Xm5ControlUi
                     {
                         g.DrawString(text, font, brush, box, format);
                     }
+                }
+                IntPtr handle = bitmap.GetHicon();
+                try
+                {
+                    return (Icon)Icon.FromHandle(handle).Clone();
+                }
+                finally
+                {
+                    DestroyIcon(handle);
+                }
+            }
+            finally
+            {
+                bitmap.Dispose();
+            }
+        }
+
+        // Two bars, drawn rather than typed: a pause glyph from a font would
+        // depend on coverage that may not be there, and at the size this lands
+        // on screen a pair of rectangles is crisper than any glyph would be.
+        private static Icon RenderPausedIcon(Color color)
+        {
+            var bitmap = new Bitmap(32, 32);
+            try
+            {
+                using (var g = Graphics.FromImage(bitmap))
+                using (var brush = new SolidBrush(color))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.Clear(Color.Transparent);
+                    FillRound(g, brush, new Rectangle(7, 6, 7, 20), 3);
+                    FillRound(g, brush, new Rectangle(18, 6, 7, 20), 3);
                 }
                 IntPtr handle = bitmap.GetHicon();
                 try

@@ -142,14 +142,23 @@ the channel a couple of seconds after losing it, which is faster than a phone
 can establish a session, so it wins every time. Nothing on the phone explains
 this, which is why the setting is off by default and why there are two ways to
 give the channel back: the meter stops while the desktop is locked, and
-"Pause the sound level meter" in the tray menu stops it at any time. Locking is
-used rather than keyboard and mouse idleness, because sitting still is what
-watching a film looks like and there is nothing to hand back to while the
-screen is locked anyway. It does not care which device is playing — the level
-of something streaming from a phone is readable here too, since the control
-channel is separate from the audio. Dimmed digits mean the number is no longer
-being refreshed — paused, or the link has gone — rather than that the level has
-changed, and the tooltip says which.
+"Pause tray sound level when minimized" in the tray menu stops it whenever the
+window is out of the way. Pausing has no effect while the window is open,
+because the ordinary state refresh is holding the channel every fifteen seconds
+regardless and stopping the meter would free nothing.
+
+Locking is used rather than keyboard and mouse idleness, because sitting still
+is what watching a film looks like and there is nothing to hand back to while
+the screen is locked anyway. It does not care which device is playing — the
+level of something streaming from a phone is readable here too, since the
+control channel is separate from the audio.
+
+The icon has four appearances and they are meant to be told apart: bright
+digits for a live reading, a bright dash when nothing is playing, two bright
+bars when paused, and dimmed digits when the reading has stopped being
+refreshed. Dimming therefore means something is wrong, never that the level has
+changed and never that you asked for it — pausing has its own shape precisely
+so it cannot be mistaken for a fault. The tooltip says which in words.
 
 Useful when adding support for a new model:
 
