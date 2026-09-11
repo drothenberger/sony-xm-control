@@ -502,6 +502,11 @@ namespace Xm5ControlUi
             get { return exiting || trayCleanupStarted || IsDisposed || Disposing; }
         }
 
+        private bool WindowIsShowing
+        {
+            get { return Visible && WindowState != FormWindowState.Minimized; }
+        }
+
         private bool CanUpdateUi
         {
             get { return !IsClosing && IsHandleCreated; }
@@ -1762,6 +1767,15 @@ namespace Xm5ControlUi
                     lastStateRefreshConnected = false;
                     return;
                 }
+
+                // Nothing outside the window shows device state: every tray menu
+                // entry is a fire-and-forget command and the tray tooltip is just
+                // the model name. Refreshing while the window is hidden spends
+                // three seconds on the headset's control channel to update
+                // controls nobody can see, and only one program can hold that
+                // channel at a time, so it also keeps the phone app off it. The
+                // window asks for a refresh when it comes back.
+                if (!WindowIsShowing) return;
 
                 bool stateRefreshExpired = DateTime.UtcNow - lastStateRefreshAt >= TimeSpan.FromMilliseconds(AutoStateRefreshIntervalMs);
                 if (!ReferenceEquals(lastStateRefreshProfile, detection.Profile) || !lastStateRefreshConnected || stateRefreshExpired)
