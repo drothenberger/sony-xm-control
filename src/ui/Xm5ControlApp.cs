@@ -2382,27 +2382,33 @@ namespace Xm5ControlUi
                 SetSoundPressureSupported(true);
             }
 
+            // A reading every interval is expected; going quiet for several
+            // means the number on screen has stopped tracking the headset, and
+            // that has to look different from a headset reporting silence.
+            //
+            // Judged on the age of the last reading alone, rather than on
+            // whether a stream happens to be running this instant. Every
+            // command borrows the channel for a few seconds and the state batch
+            // does it every fifteen, so keying off the stream made the icon
+            // flicker several times a minute while the window was open, on a
+            // reading that was only a moment old. The clock restarts with each
+            // stream, so a reconnection gets the same grace.
+            if (DateTime.UtcNow - lastMeterReadingAt > TimeSpan.FromMilliseconds(MeterStaleAfterMs))
+            {
+                SetMeterStale(true);
+            }
+
             if (!ShouldRunMeter())
             {
                 if (meterProcess != null) StopMeterStream();
-                // Walking away, pausing or unplugging all stop the readings
-                // without producing one, so the icon is told here rather than
-                // waiting for a line that is not coming.
+                // Locking, pausing or unplugging all stop the readings without
+                // producing one, so the icon is told here rather than waiting
+                // for a line that is not coming.
                 RefreshTrayMeter();
                 return;
             }
 
-            if (meterProcess != null)
-            {
-                // A reading every interval is expected; going quiet for several
-                // means the link is struggling rather than that nothing is
-                // playing, and the two have to look different on screen.
-                if (DateTime.UtcNow - lastMeterReadingAt > TimeSpan.FromMilliseconds(MeterStaleAfterMs))
-                {
-                    SetMeterStale(true);
-                }
-                return;
-            }
+            if (meterProcess != null) return;
 
             // Do not fight a command for the gate; the next tick will retry.
             if (commandBusy) return;
@@ -2600,12 +2606,23 @@ namespace Xm5ControlUi
         // pause item, the headset going away - comes through here.
         private void RefreshTrayMeter()
         {
-            // Dimmed digits mean "this number is no longer being refreshed",
-            // whether that is a stalled stream, a paused meter, an idle PC or a
-            // headset that has gone. They are left on screen rather than
-            // blanked: the last known level still says more than nothing, and
-            // blanking would claim the audio had stopped, which it has not.
-            trayMeterDigitsDim = meterStale || meterProcess == null;
+            // Dimmed digits mean "this number is no longer being refreshed".
+            // Staleness is the general test - a reading is overdue - and the
+            // two cases where that is known before the clock proves it are
+            // named outright, so the icon reacts to them at once instead of
+            // four seconds later.
+            //
+            // Pausing is deliberately not one of them on its own: with the
+            // window open the stream keeps running whatever the tray menu says,
+            // so the digits really are live and dimming them would be a lie.
+            // The tick mark on the menu item is what shows the pause is armed.
+            //
+            // Digits are left on screen rather than blanked. The last known
+            // level still says more than nothing, and blanking would claim the
+            // audio had stopped, which is not what any of this knows.
+            trayMeterDigitsDim = meterStale
+                || sessionLocked
+                || (trayMeterPaused && !WindowIsShowing);
             ApplyTrayIcon();
             ApplyTrayTooltip();
         }
@@ -4649,7 +4666,7 @@ namespace Xm5ControlUi
 
             trayMeterOnButton = NewSettingButton("On");
             trayMeterOffButton = NewSettingButton("Off");
-            AddSettingRow(panel, "Show the sound level in the tray", "Keeps the headset's control channel while hidden.", 260, trayMeterOnButton, trayMeterOffButton);
+            AddSettingRow(panel, "Show the sound level in the tray", "Holds the control channel while hidden.", 260, trayMeterOnButton, trayMeterOffButton);
             trayMeterOnButton.Click += (s, e) => SetShowSoundLevelInTray(true);
             trayMeterOffButton.Click += (s, e) => SetShowSoundLevelInTray(false);
 
