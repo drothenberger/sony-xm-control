@@ -135,8 +135,13 @@ to the headset stops the stream first and it resumes afterwards.
 
 The reading can also be drawn onto the tray icon, which is off by default under
 "Show the sound level in the tray" in App settings. That is the one case where
-the app wants the control channel while its window is hidden, so it comes with
-two ways to give the channel back: it stops while the desktop is locked, and
+the app wants the control channel while its window is hidden, and the headset
+allows only one control session at a time, so **while it is running the phone
+app cannot connect at all** — not slowly, not intermittently. The PC reclaims
+the channel a couple of seconds after losing it, which is faster than a phone
+can establish a session, so it wins every time. Nothing on the phone explains
+this, which is why the setting is off by default and why there are two ways to
+give the channel back: the meter stops while the desktop is locked, and
 "Pause the sound level meter" in the tray menu stops it at any time. Locking is
 used rather than keyboard and mouse idleness, because sitting still is what
 watching a film looks like and there is nothing to hand back to while the
