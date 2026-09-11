@@ -120,4 +120,20 @@ xm5ctl listen --hex          dump notification frames as the headset sends them
 xm5ctl raw "66 19" --hex     send one payload and print the raw reply bytes
 ```
 
+The app has no Bluetooth code of its own: every action runs `xm5ctl` once and
+reads the result back from its output. Opening the headset's control channel is
+the slow part of that, and how slow depends on what else is connected to the
+headset — roughly 280 ms when the PC is its only link, and 1.8 s or more when a
+phone is connected as well.
+
+Waiting for a reply is the opposite: once the channel is open, an answer arrives
+in milliseconds. The two therefore have separate budgets. `--connect-timeout`
+covers opening the channel and defaults to 5000 ms; `--timeout` covers waiting
+for an acknowledgement and a reply and defaults to 900 ms. A single shared value
+cannot serve both — set low enough to keep the reply wait short it fails to
+connect at all, and set high enough to connect it makes every unanswered command
+wait that long. Commands the headset does not answer are normal rather than
+exceptional, because a batch sweeps inquired types that not every model
+implements.
+
 Bluetooth control depends on Windows being able to open the headset's RFCOMM service. If commands fail, make sure the device is paired, connected, and selected as an audio device in Windows.
