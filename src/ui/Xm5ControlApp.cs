@@ -273,6 +273,9 @@ namespace Xm5ControlUi
         private const int AutoDetectIntervalMs = 4000;
         private const int AutoStateRefreshIntervalMs = 15000;
         private const int LiveEqDebounceMs = 260;
+        // Comfortably longer than the debounce above, so the window between the
+        // last slider move and the write leaving is covered too.
+        private const int EqEditOwnsSlidersMs = 2000;
         private const int BackendCommandPaceMs = 450;
         private const string StateBatchCommand = "batch \"22 00;66 17;D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05\" --timeout 1800";
 
@@ -355,6 +358,7 @@ namespace Xm5ControlUi
         private bool updatingEqUi;
         private bool liveEqSendRunning;
         private bool liveEqSendPending;
+        private DateTime lastEqEditAt = DateTime.MinValue;
         private int eqFetchGeneration;
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -1942,7 +1946,7 @@ namespace Xm5ControlUi
             int[] eqValues;
             if (TryParseEqualizerState(output, out eqPreset, out eqValues))
             {
-                if (HasEqValues(eqValues))
+                if (HasEqValues(eqValues) && !EqualizerEditInFlight())
                 {
                     UpdateEqualizerUi(eqPreset, eqValues);
                 }
@@ -2380,6 +2384,7 @@ namespace Xm5ControlUi
                 eqValueLabels[index].Text = FormatEqValue(changed.Value);
             }
             if (updatingEqUi) return;
+            lastEqEditAt = DateTime.UtcNow;
 
             int[] values = currentEqPreset == 0xA0 ? CurrentEqValues() : ResolveEqValuesForManualEdit(currentEqPreset);
             if (index >= 0 && index < values.Length) values[index] = Math.Max(0, Math.Min(20, changed.Value));
@@ -2449,6 +2454,19 @@ namespace Xm5ControlUi
         private static bool HasEqValues(int[] values)
         {
             return values != null && values.Length >= 6;
+        }
+
+        // A state refresh reads the equalizer before it returns, so its values
+        // predate anything the user has done since. Applying them drags the
+        // slider back under the user, and the resend that follows then writes
+        // that reverted value to the headset, so the edit is lost rather than
+        // merely redrawn. An edit owns the sliders until it has been sent:
+        // while a write is in flight or queued, and for a moment after the last
+        // move, so that the gap before the debounce fires is covered as well.
+        private bool EqualizerEditInFlight()
+        {
+            if (liveEqSendRunning || liveEqSendPending) return true;
+            return DateTime.UtcNow - lastEqEditAt < TimeSpan.FromMilliseconds(EqEditOwnsSlidersMs);
         }
 
         private void InvalidateEqualizerFetch()
