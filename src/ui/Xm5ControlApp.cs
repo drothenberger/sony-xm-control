@@ -1,7 +1,9 @@
 using System;
+using Microsoft.Win32;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -362,6 +364,30 @@ namespace Xm5ControlUi
         private DateTime lastMeterReadingAt = DateTime.MinValue;
         private DateTime meterStreamFailedAt = DateTime.MinValue;
         private bool soundPressureUnsupported;
+        // Off by default on purpose: it is the only thing here that holds the
+        // headset's control channel while the window is hidden, which keeps the
+        // phone app off it, and that is not a cost to impose on someone who
+        // never asked for the reading.
+        private bool trayMeterEnabled;
+        private bool trayMeterPaused;
+        private bool sessionLocked;
+        // Held so it can be unhooked: SystemEvents keeps a static strong
+        // reference, which would otherwise outlive the form and call back into
+        // a disposed one.
+        private SessionSwitchEventHandler sessionSwitchHandler;
+        private ToolStripMenuItem trayMeterPauseItem;
+        // The generated icon currently on the NotifyIcon, if any. Replacing it
+        // without disposing the old one leaks four GDI objects per update,
+        // which at this cadence exhausts the per-process limit within the hour.
+        private Icon trayMeterIcon;
+        private string trayMeterDigits;
+        private bool trayMeterDigitsDim;
+        // What is actually on the icon now, so a reading that repeats - which
+        // most of them do - does not redraw it.
+        private string trayIconTextDrawn;
+        private bool trayIconDimDrawn;
+        private bool trayIconApplied;
+        private string trayTooltipApplied;
         private bool autoDetectRunning;
         private bool lastStateRefreshConnected;
         private bool immediateExitQueued;
@@ -513,6 +539,21 @@ namespace Xm5ControlUi
                 Visible = true
             };
             trayIcon.DoubleClick += (s, e) => ShowWindow();
+            // Raised on a SystemEvents thread, so it is marshalled rather than
+            // touched directly; PostToUi drops it if the handle has gone.
+            sessionSwitchHandler = (s, e) =>
+            {
+                if (e.Reason != SessionSwitchReason.SessionLock &&
+                    e.Reason != SessionSwitchReason.SessionUnlock) return;
+                bool locked = e.Reason == SessionSwitchReason.SessionLock;
+                PostToUi(() => SetSessionLocked(locked));
+            };
+            SystemEvents.SessionSwitch += sessionSwitchHandler;
+            // The plain glyph and the bare title are what is showing now; both
+            // caches record that so the first real reading is the first update
+            // actually sent to the shell.
+            trayTooltipApplied = trayIcon.Text;
+            trayIconApplied = true;
 
             autoDetectTimer = new System.Windows.Forms.Timer { Interval = AutoDetectIntervalMs };
             autoDetectTimer.Tick += async (s, e) => await RunUiTaskAsync(AutoDetectTickAsync);
@@ -1545,6 +1586,15 @@ namespace Xm5ControlUi
             var menu = new ContextMenuStrip();
             menu.Items.Add("Open window", null, (s, e) => ShowWindow());
             menu.Items.Add("App settings...", null, (s, e) => ConfigureAppSettings());
+            // The headset allows one control session at a time, so a running
+            // tray meter is why the phone app cannot connect. That has to be
+            // undoable from the tray itself, without opening the window and
+            // taking the channel all over again to do it.
+            trayMeterPauseItem = new ToolStripMenuItem("Pause the sound level meter");
+            trayMeterPauseItem.CheckOnClick = false;
+            trayMeterPauseItem.Click += (s, e) => ToggleTrayMeterPaused();
+            trayMeterPauseItem.Available = trayMeterEnabled;
+            menu.Items.Add(trayMeterPauseItem);
             menu.Items.Add(new ToolStripSeparator());
             AddTrayAction(menu.Items, "Noise cancelling", SetAncAsync);
             AddTrayAction(menu.Items, "Ambient sound: 12", () => SetAmbientAsync(12));
@@ -1599,6 +1649,17 @@ namespace Xm5ControlUi
         private string TrayTitle()
         {
             string title = AppTitle();
+            if (trayMeterEnabled && trayMeterDigits != null)
+            {
+                title += trayMeterDigits == NoSoundPressureText
+                    ? " - nothing playing"
+                    : " - " + trayMeterDigits + " dB";
+                // The icon says this by dimming; the tooltip has room to say it
+                // in words, and a number nobody flagged as stopped is the one
+                // thing here that could be read as current when it is not.
+                if (trayMeterDigitsDim) title += " (not updating)";
+            }
+            // 63 characters is the Shell_NotifyIcon limit for a tooltip.
             return title.Length <= 63 ? title : title.Substring(0, 63);
         }
 
@@ -1669,6 +1730,7 @@ namespace Xm5ControlUi
             minimizeToTray = true;
             startMinimizedToTray = false;
             trayNoticeShown = false;
+            trayMeterEnabled = false;
             string path = AppSettingsConfigPath();
             if (!File.Exists(path)) return;
 
@@ -1695,6 +1757,10 @@ namespace Xm5ControlUi
                     {
                         trayNoticeShown = ParseBool(value);
                     }
+                    else if (string.Equals(key, "ShowSoundLevelInTray", StringComparison.OrdinalIgnoreCase))
+                    {
+                        trayMeterEnabled = ParseBool(value);
+                    }
                 }
             }
             catch
@@ -1712,7 +1778,8 @@ namespace Xm5ControlUi
                 {
                     "StartMinimizedInTray=" + (startMinimizedToTray ? "true" : "false"),
                     "MinimizeToTrayOnClose=" + (minimizeToTray ? "true" : "false"),
-                    "TrayNoticeShown=" + (trayNoticeShown ? "true" : "false")
+                    "TrayNoticeShown=" + (trayNoticeShown ? "true" : "false"),
+                    "ShowSoundLevelInTray=" + (trayMeterEnabled ? "true" : "false")
                 });
             }
             catch
@@ -1850,7 +1917,7 @@ namespace Xm5ControlUi
             if (!Visible || WindowState == FormWindowState.Minimized) ShowWindow();
 
             bool startAtBoot = IsStartAtBootEnabled();
-            using (var dialog = new AppSettingsDialog(startAtBoot, startMinimizedToTray, minimizeToTray, page, card, cardSoft, line, ink, subdued, blue, bluePressed))
+            using (var dialog = new AppSettingsDialog(startAtBoot, startMinimizedToTray, minimizeToTray, trayMeterEnabled, page, card, cardSoft, line, ink, subdued, blue, bluePressed))
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 if (!SetStartAtBoot(dialog.StartAtBoot))
@@ -1866,6 +1933,7 @@ namespace Xm5ControlUi
                 if (dialog.MinimizeToTrayOnClose && !minimizeToTray) trayNoticeShown = false;
                 startMinimizedToTray = dialog.StartMinimizedInTray;
                 minimizeToTray = dialog.MinimizeToTrayOnClose;
+                SetTrayMeterEnabled(dialog.ShowSoundLevelInTray);
                 SaveAppPreferences();
                 if (lastActionLabel != null && !lastActionLabel.IsDisposed) lastActionLabel.Text = "App settings saved";
                 SetStatus("App settings saved", subdued);
@@ -2089,7 +2157,7 @@ namespace Xm5ControlUi
 
             Text = AppTitle();
             if (titleLabel != null) titleLabel.Text = currentProfile.DisplayName;
-            if (trayIcon != null && !trayCleanupStarted) trayIcon.Text = TrayTitle();
+            ApplyTrayTooltip();
             if (heroImageBox != null && !heroImageBox.IsDisposed && (changed || heroImageBox.Image == null))
             {
                 Image previous = heroImageBox.Image;
@@ -2293,6 +2361,10 @@ namespace Xm5ControlUi
             if (!ShouldRunMeter())
             {
                 if (meterProcess != null) StopMeterStream();
+                // Walking away, pausing or unplugging all stop the readings
+                // without producing one, so the icon is told here rather than
+                // waiting for a line that is not coming.
+                RefreshTrayMeter();
                 return;
             }
 
@@ -2318,10 +2390,43 @@ namespace Xm5ControlUi
         {
             if (IsClosing || soundPressureUnsupported) return false;
             if (!lastStateRefreshConnected) return false;
-            // Nothing to read while the window is in the tray, and holding the
-            // control channel there would keep the phone app off it for a
-            // number nobody can see.
-            return WindowIsShowing;
+            // Checked before the window, because a locked desktop hides the
+            // window just as thoroughly as it hides the tray icon.
+            if (sessionLocked) return false;
+            if (WindowIsShowing) return true;
+            // Nothing on the window to read while it is in the tray, and holding
+            // the control channel there would keep the phone app off it for a
+            // number nobody can see. The tray icon is the exception: it shows
+            // the reading precisely while the window is hidden, so it earns the
+            // channel - but only while it is switched on and not paused from
+            // the tray menu.
+            return trayMeterEnabled && !trayMeterPaused;
+        }
+
+        // Locking is the one unambiguous "I am not here" signal available: the
+        // desktop is gone, so neither the tray icon nor the window has a reader
+        // and the control channel is better off back with whatever else wants
+        // it. Unlocking is all it takes to resume - the supervisor picks the
+        // stream back up on its next tick, the same way it does after a command
+        // has borrowed the channel.
+        //
+        // Deliberately not inferred from keyboard and mouse idleness. Sitting
+        // still is what watching a film looks like, so backing off there would
+        // switch the meter off in the middle of the case it exists for.
+        //
+        // The flag starts false and only ever moves on an event that actually
+        // arrives, so a notification that never comes leaves the meter running
+        // rather than never starting. Running too much is visible in the tray
+        // and fixable from its menu; never running is indistinguishable from a
+        // feature that does not work.
+        private void SetSessionLocked(bool locked)
+        {
+            if (sessionLocked == locked) return;
+            sessionLocked = locked;
+            // Hand the channel back now rather than at the next tick, so the
+            // phone can have it as soon as the screen locks.
+            if (locked) StopMeterStream();
+            RefreshTrayMeter();
         }
 
         private void StartMeterStream()
@@ -2368,6 +2473,9 @@ namespace Xm5ControlUi
                 meterGateHeld = false;
                 commandGate.Release();
             }
+            // Whether the stream is running is what decides whether the tray
+            // digits are dimmed, so both ends of its life say so.
+            RefreshTrayMeter();
         }
 
         // Safe to call when nothing is running, and safe to call twice.
@@ -2404,6 +2512,7 @@ namespace Xm5ControlUi
                 meterGateHeld = false;
                 commandGate.Release();
             }
+            RefreshTrayMeter();
         }
 
         private void OnMeterStreamExited()
@@ -2434,6 +2543,8 @@ namespace Xm5ControlUi
             // to report while nothing is playing.
             var level = Regex.Match(match.Groups[1].Value, @"^(\d+)\s*dB$", RegexOptions.IgnoreCase);
             SetSoundPressureText(level.Success ? level.Groups[1].Value + " dB" : NoSoundPressureText);
+            trayMeterDigits = level.Success ? level.Groups[1].Value : NoSoundPressureText;
+            RefreshTrayMeter();
         }
 
         private void SetMeterStale(bool stale)
@@ -2444,6 +2555,100 @@ namespace Xm5ControlUi
             {
                 soundPressureLabel.ForeColor = stale ? subdued : ink;
             }
+            RefreshTrayMeter();
+        }
+
+        // The one place that decides what the tray icon says. Everything that
+        // can change the answer - a reading, a stalled stream, the setting, the
+        // pause item, the headset going away - comes through here.
+        private void RefreshTrayMeter()
+        {
+            // Dimmed digits mean "this number is no longer being refreshed",
+            // whether that is a stalled stream, a paused meter, an idle PC or a
+            // headset that has gone. They are left on screen rather than
+            // blanked: the last known level still says more than nothing, and
+            // blanking would claim the audio had stopped, which it has not.
+            trayMeterDigitsDim = meterStale || meterProcess == null;
+            ApplyTrayIcon();
+            ApplyTrayTooltip();
+        }
+
+        // Setting NotifyIcon.Text talks to the shell whether or not the string
+        // changed, and this runs on every reading, so only real changes go out.
+        private void ApplyTrayTooltip()
+        {
+            if (trayIcon == null || trayCleanupStarted) return;
+            string title = TrayTitle();
+            if (title == trayTooltipApplied) return;
+            trayTooltipApplied = title;
+            trayIcon.Text = title;
+        }
+
+        private void ApplyTrayIcon()
+        {
+            if (trayIcon == null || trayCleanupStarted) return;
+
+            string text = trayMeterEnabled ? trayMeterDigits : null;
+            bool dim = trayMeterDigitsDim;
+            if (trayIconApplied && text == trayIconTextDrawn && (text == null || dim == trayIconDimDrawn)) return;
+
+            if (text == null)
+            {
+                trayIcon.Icon = notificationIcon;
+                DisposeTrayMeterIcon();
+            }
+            else
+            {
+                Icon rendered;
+                try
+                {
+                    rendered = RenderDigitsIcon(text, dim ? Color.FromArgb(128, 134, 142) : Color.FromArgb(226, 230, 235));
+                }
+                catch
+                {
+                    return;
+                }
+                // The shell copies the icon when it is handed over, so the one
+                // it was using before can go as soon as the new one is set.
+                // Leaving it instead leaks four GDI objects an update.
+                Icon previous = trayMeterIcon;
+                trayMeterIcon = rendered;
+                trayIcon.Icon = rendered;
+                if (previous != null) previous.Dispose();
+            }
+
+            trayIconTextDrawn = text;
+            trayIconDimDrawn = dim;
+            trayIconApplied = true;
+        }
+
+        private void DisposeTrayMeterIcon()
+        {
+            Icon previous = trayMeterIcon;
+            trayMeterIcon = null;
+            if (previous != null) previous.Dispose();
+        }
+
+        private void SetTrayMeterEnabled(bool enabled)
+        {
+            trayMeterEnabled = enabled;
+            if (!enabled) trayMeterPaused = false;
+            if (trayMeterPauseItem != null)
+            {
+                trayMeterPauseItem.Available = enabled;
+                trayMeterPauseItem.Checked = trayMeterPaused;
+            }
+            RefreshTrayMeter();
+        }
+
+        private void ToggleTrayMeterPaused()
+        {
+            trayMeterPaused = !trayMeterPaused;
+            if (trayMeterPauseItem != null) trayMeterPauseItem.Checked = trayMeterPaused;
+            // Give the channel back at once rather than at the next tick, so
+            // the phone app can have it the moment the user asks for it.
+            if (trayMeterPaused && !WindowIsShowing) StopMeterStream();
+            RefreshTrayMeter();
         }
 
         private void SetSoundPressureSupported(bool supported)
@@ -3739,6 +3944,12 @@ namespace Xm5ControlUi
             if (trayCleanupStarted) return;
             trayCleanupStarted = true;
 
+            if (sessionSwitchHandler != null)
+            {
+                SystemEvents.SessionSwitch -= sessionSwitchHandler;
+                sessionSwitchHandler = null;
+            }
+
             if (autoDetectTimer != null) autoDetectTimer.Dispose();
             if (liveEqTimer != null) liveEqTimer.Dispose();
             if (meterSupervisorTimer != null) meterSupervisorTimer.Dispose();
@@ -3749,6 +3960,7 @@ namespace Xm5ControlUi
                 trayIcon.Visible = false;
                 trayIcon.Dispose();
             }
+            DisposeTrayMeterIcon();
             if (heroImageBox != null && heroImageBox.Image != null)
             {
                 Image image = heroImageBox.Image;
@@ -3994,6 +4206,61 @@ namespace Xm5ControlUi
             DestroyIcon(handle);
             bitmap.Dispose();
             return icon;
+        }
+
+        // Windows scales this 32x32 bitmap to whatever size the tray asks for,
+        // so the digits are fitted to the box rather than drawn at a fixed
+        // point size: the app is DPI-unaware, which puts the icon at about
+        // 28 px on a 175% display, and anything smaller than the box allows
+        // stops being readable there. Two digits is the design size, since
+        // readings run from the low thirties to the low nineties; a third digit
+        // only turns up at volumes nobody listens at, and is left to shrink
+        // rather than be truncated into a number that would simply be wrong.
+        private static Icon RenderDigitsIcon(string text, Color color)
+        {
+            var bitmap = new Bitmap(32, 32);
+            try
+            {
+                var box = new RectangleF(1f, 1f, 30f, 30f);
+                using (var g = Graphics.FromImage(bitmap))
+                using (var brush = new SolidBrush(color))
+                using (var format = new StringFormat(StringFormat.GenericTypographic))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                    g.Clear(Color.Transparent);
+                    format.Alignment = StringAlignment.Center;
+                    format.LineAlignment = StringAlignment.Center;
+                    using (var font = FitFont(g, text, box.Width, box.Height, format))
+                    {
+                        g.DrawString(text, font, brush, box, format);
+                    }
+                }
+                IntPtr handle = bitmap.GetHicon();
+                try
+                {
+                    return (Icon)Icon.FromHandle(handle).Clone();
+                }
+                finally
+                {
+                    DestroyIcon(handle);
+                }
+            }
+            finally
+            {
+                bitmap.Dispose();
+            }
+        }
+
+        private static Font FitFont(Graphics g, string text, float boxWidth, float boxHeight, StringFormat format)
+        {
+            const float reference = 24f;
+            using (var probe = new Font("Segoe UI", reference, FontStyle.Bold, GraphicsUnit.Pixel))
+            {
+                SizeF size = g.MeasureString(text, probe, PointF.Empty, format);
+                float scale = Math.Min(boxWidth / Math.Max(size.Width, 1f), boxHeight / Math.Max(size.Height, 1f));
+                return new Font("Segoe UI", Math.Max(6f, reference * scale), FontStyle.Bold, GraphicsUnit.Pixel);
+            }
         }
 
         private static void FillRound(Graphics g, Brush brush, Rectangle bounds, int radius)
@@ -4244,12 +4511,15 @@ namespace Xm5ControlUi
         private PillButton startMinimizedOffButton;
         private PillButton minimizeOnCloseOnButton;
         private PillButton minimizeOnCloseOffButton;
+        private PillButton trayMeterOnButton;
+        private PillButton trayMeterOffButton;
 
         public bool StartAtBoot { get; private set; }
         public bool StartMinimizedInTray { get; private set; }
         public bool MinimizeToTrayOnClose { get; private set; }
+        public bool ShowSoundLevelInTray { get; private set; }
 
-        public AppSettingsDialog(bool startAtBoot, bool startMinimizedInTray, bool minimizeToTrayOnClose, Color page, Color card, Color cardSoft, Color line, Color ink, Color subdued, Color blue, Color bluePressed)
+        public AppSettingsDialog(bool startAtBoot, bool startMinimizedInTray, bool minimizeToTrayOnClose, bool showSoundLevelInTray, Color page, Color card, Color cardSoft, Color line, Color ink, Color subdued, Color blue, Color bluePressed)
         {
             this.page = page;
             this.card = card;
@@ -4263,13 +4533,14 @@ namespace Xm5ControlUi
             StartAtBoot = startAtBoot;
             StartMinimizedInTray = startMinimizedInTray;
             MinimizeToTrayOnClose = minimizeToTrayOnClose;
+            ShowSoundLevelInTray = showSoundLevelInTray;
 
             Text = "App settings";
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(560, 420);
+            ClientSize = new Size(560, 498);
             BackColor = page;
             ForeColor = ink;
             Font = new Font("Segoe UI", 10f);
@@ -4297,7 +4568,7 @@ namespace Xm5ControlUi
             var panel = new Panel
             {
                 Location = new Point(24, 70),
-                Size = new Size(512, 236),
+                Size = new Size(512, 314),
                 BackColor = card,
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
@@ -4324,6 +4595,14 @@ namespace Xm5ControlUi
             AddSettingRow(panel, "Minimize to tray on close", "The close button hides the app instead of exiting.", 182, minimizeOnCloseOnButton, minimizeOnCloseOffButton);
             minimizeOnCloseOnButton.Click += (s, e) => SetMinimizeToTrayOnClose(true);
             minimizeOnCloseOffButton.Click += (s, e) => SetMinimizeToTrayOnClose(false);
+
+            AddDivider(panel, 238);
+
+            trayMeterOnButton = NewSettingButton("On");
+            trayMeterOffButton = NewSettingButton("Off");
+            AddSettingRow(panel, "Show the sound level in the tray", "Keeps the headset's control channel while hidden.", 260, trayMeterOnButton, trayMeterOffButton);
+            trayMeterOnButton.Click += (s, e) => SetShowSoundLevelInTray(true);
+            trayMeterOffButton.Click += (s, e) => SetShowSoundLevelInTray(false);
 
             var save = new PillButton("Save", blue, bluePressed)
             {
@@ -4354,6 +4633,7 @@ namespace Xm5ControlUi
             SetStartAtBoot(StartAtBoot);
             SetStartMinimizedInTray(StartMinimizedInTray);
             SetMinimizeToTrayOnClose(MinimizeToTrayOnClose);
+            SetShowSoundLevelInTray(ShowSoundLevelInTray);
         }
 
         private PillButton NewSettingButton(string text)
@@ -4426,6 +4706,12 @@ namespace Xm5ControlUi
         {
             MinimizeToTrayOnClose = enabled;
             SetPair(minimizeOnCloseOnButton, minimizeOnCloseOffButton, enabled);
+        }
+
+        private void SetShowSoundLevelInTray(bool enabled)
+        {
+            ShowSoundLevelInTray = enabled;
+            SetPair(trayMeterOnButton, trayMeterOffButton, enabled);
         }
 
         private void SetPair(PillButton onButton, PillButton offButton, bool enabled)
