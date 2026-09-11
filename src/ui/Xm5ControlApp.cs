@@ -389,6 +389,11 @@ namespace Xm5ControlUi
         private bool trayIconApplied;
         private string trayTooltipApplied;
         private bool autoDetectRunning;
+        // Whether the last scan found the headset connected. Distinct from
+        // lastStateRefreshConnected, which says whether the last state batch
+        // got through: the scan is a local enumeration costing 64 ms and no
+        // control channel, and it runs whether or not the window is visible.
+        private bool lastScanConnected;
         private bool lastStateRefreshConnected;
         private bool immediateExitQueued;
         private DateTime lastBackendCommandAtUtc = DateTime.MinValue;
@@ -2227,11 +2232,18 @@ namespace Xm5ControlUi
             var detection = FindDetectedProfile(output);
             if (detection == null)
             {
+                lastScanConnected = false;
                 SetStatus("No supported device", amber);
                 if (connectionLabel != null) connectionLabel.Text = "No supported device";
                 return DetectAttempt.Missing;
             }
 
+            // Recorded here, where the scan says it, rather than after the state
+            // batch has run. The batch is skipped while the window is hidden,
+            // so a flag only it can set stays false for good once the headset
+            // has dropped there - which is exactly when the tray meter is the
+            // only thing that wants to know.
+            lastScanConnected = detection.Connected;
             bool changed = ApplyProfile(detection.Profile);
             if (connectionLabel != null) connectionLabel.Text = detection.Connected ? "Connected" : "Not connected";
             if (lastActionLabel != null && changed) lastActionLabel.Text = "Detected " + detection.Profile.DisplayName;
@@ -2395,7 +2407,8 @@ namespace Xm5ControlUi
         private bool ShouldRunMeter()
         {
             if (IsClosing || soundPressureUnsupported) return false;
-            if (!lastStateRefreshConnected) return false;
+            // The scan's answer, not the state batch's: see lastScanConnected.
+            if (!lastScanConnected) return false;
             // Checked before the window, because a locked desktop hides the
             // window just as thoroughly as it hides the tray icon.
             if (sessionLocked) return false;
