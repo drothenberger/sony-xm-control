@@ -3110,10 +3110,11 @@ namespace Xm5ControlUi
                 return "";
             }
 
-            await commandGate.WaitAsync();
+            bool channel = UsesControlChannel(args);
+            if (channel) await commandGate.WaitAsync();
             if (IsClosing)
             {
-                commandGate.Release();
+                if (channel) commandGate.Release();
                 return "";
             }
 
@@ -3135,7 +3136,7 @@ namespace Xm5ControlUi
             finally
             {
                 if (!IsClosing) SetBusy(false, "Ready");
-                commandGate.Release();
+                if (channel) commandGate.Release();
             }
         }
 
@@ -3143,6 +3144,19 @@ namespace Xm5ControlUi
         {
             if (IsClosing) return "";
             if (!File.Exists(backendPath)) return "";
+            if (!UsesControlChannel(args))
+            {
+                try
+                {
+                    var scanOutput = await RunBackendProcessPacedAsync(args);
+                    return IsClosing ? "" : scanOutput;
+                }
+                catch
+                {
+                    return "";
+                }
+            }
+
             if (!commandGate.Wait(0)) return null;
             try
             {
@@ -3184,6 +3198,17 @@ namespace Xm5ControlUi
             {
                 commandGate.Release();
             }
+        }
+
+        // The command gate exists to keep two commands off the headset control
+        // channel at once, because the headset allows only one control session.
+        // Listing paired devices does not use that channel at all: it is a local
+        // Bluetooth enumeration. Making it wait behind the gate meant an
+        // equalizer drag, whose writes hold the gate, could starve the device
+        // scan and leave the app reporting the headset as disconnected.
+        private static bool UsesControlChannel(string args)
+        {
+            return args == null || !args.StartsWith("scan", StringComparison.OrdinalIgnoreCase);
         }
 
         private string RunBackendProcess(string args)
