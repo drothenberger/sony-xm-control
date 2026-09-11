@@ -2012,15 +2012,16 @@ namespace Xm5ControlUi
             autoDetectRunning = true;
             try
             {
-                var detection = await DetectProfileAsync(true);
+                var attempt = await DetectProfileAsync(true);
                 if (IsClosing) return;
-                if (detection == null)
-                {
-                    lastStateRefreshConnected = false;
-                    return;
-                }
+                // A scan that never ran says nothing about whether the headset
+                // is still there, so the last known state has to stand. Marking
+                // it disconnected here would make every command that happens to
+                // overlap the tick look like the headset going away.
+                if (!attempt.Scanned) return;
 
-                if (!detection.Connected)
+                var detection = attempt.Detection;
+                if (detection == null || !detection.Connected)
                 {
                     lastStateRefreshConnected = false;
                     return;
@@ -2042,25 +2043,50 @@ namespace Xm5ControlUi
             }
         }
 
-        private async Task<DeviceDetection> DetectProfileAsync(bool quiet)
+        private async Task<DetectAttempt> DetectProfileAsync(bool quiet)
         {
             var output = quiet ? await RunBackendQuietAsync("scan") : await RunBackendAsync("scan", "Detecting device");
-            if (IsClosing) return null;
-            if (output == null) return null;
+            if (IsClosing) return DetectAttempt.NotScanned;
+            // The quiet runner returns null when a command already holds the
+            // gate, which means no scan happened at all. That is not the same
+            // as a scan that came back without the headset.
+            if (output == null) return DetectAttempt.NotScanned;
 
             var detection = FindDetectedProfile(output);
             if (detection == null)
             {
                 SetStatus("No supported device", amber);
                 if (connectionLabel != null) connectionLabel.Text = "No supported device";
-                return null;
+                return DetectAttempt.Missing;
             }
 
             bool changed = ApplyProfile(detection.Profile);
             if (connectionLabel != null) connectionLabel.Text = detection.Connected ? "Connected" : "Not connected";
             if (lastActionLabel != null && changed) lastActionLabel.Text = "Detected " + detection.Profile.DisplayName;
             SetStatus(detection.Connected ? "Connected" : "Not connected", detection.Connected ? green : amber);
-            return detection;
+            return new DetectAttempt(detection);
+        }
+
+        // Detection has three outcomes and the caller has to tell the last two
+        // apart: a device was found, a scan ran and did not find one, or no scan
+        // ran because a command held the command gate.
+        private sealed class DetectAttempt
+        {
+            public static readonly DetectAttempt NotScanned = new DetectAttempt(null, false);
+            public static readonly DetectAttempt Missing = new DetectAttempt(null, true);
+
+            public DetectAttempt(DeviceDetection detection) : this(detection, true)
+            {
+            }
+
+            private DetectAttempt(DeviceDetection detection, bool scanned)
+            {
+                Detection = detection;
+                Scanned = scanned;
+            }
+
+            public DeviceDetection Detection { get; private set; }
+            public bool Scanned { get; private set; }
         }
 
         private DeviceDetection FindDetectedProfile(string output)
@@ -2091,7 +2117,7 @@ namespace Xm5ControlUi
 
         private async Task RefreshAllAsync()
         {
-            var detection = await DetectProfileAsync(false);
+            var detection = (await DetectProfileAsync(false)).Detection;
             if (IsClosing) return;
             if (detection == null) return;
             var output = await RunBackendAsync(WithDevice(BuildStateBatchCommand(detection.Profile ?? currentProfile)), "Updating");
