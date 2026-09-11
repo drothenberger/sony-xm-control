@@ -30,6 +30,7 @@ Unofficial Windows controller for Sony 1000X headphones and earbuds.
 - Touch sensor panel toggle
 - Automatic power off setting
 - Tray quick actions
+- Optional sound pressure reading on the tray icon
 - Configurable global keyboard shortcuts
 
 ## Download
@@ -139,6 +140,19 @@ interval worth asking for, as described below. One backend run therefore streams
 readings for as long as the meter is on screen instead of reconnecting for each
 one. Only one program can hold that channel at a time, so any command that talks
 to the headset stops the stream first and it resumes afterwards.
+
+The reading can also be drawn onto the tray icon, which is off by default under
+"Show the sound level in the tray" in App settings. That is the one case where
+the app wants the control channel while its window is hidden, so it comes with
+two ways to give the channel back: it stops while the desktop is locked, and
+"Pause the sound level meter" in the tray menu stops it at any time. Locking is
+used rather than keyboard and mouse idleness, because sitting still is what
+watching a film looks like and there is nothing to hand back to while the
+screen is locked anyway. It does not care which device is playing — the level
+of something streaming from a phone is readable here too, since the control
+channel is separate from the audio. Dimmed digits mean the number is no longer
+being refreshed — paused, or the link has gone — rather than that the level has
+changed, and the tooltip says which.
 
 Useful when adding support for a new model:
 
