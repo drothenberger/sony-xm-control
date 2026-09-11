@@ -299,6 +299,10 @@ namespace Xm5ControlUi
         private bool startMinimizedToTray;
         private bool hasShownOnce;
         private bool trayNotifications = true;
+        // The balloon explains where the window went the first time it
+        // disappears. After that the user knows, and repeating it on every
+        // close is noise, so it is shown once and remembered across restarts.
+        private bool trayNoticeShown;
         private bool trayCleanupStarted;
         private bool commandBusy;
         private bool autoDetectRunning;
@@ -436,7 +440,7 @@ namespace Xm5ControlUi
                 if (!IsClosing && hasShownOnce && WindowState == FormWindowState.Minimized && minimizeToTray)
                 {
                     ConcealMainWindow(removeFromTaskbar: true);
-                    Notify("Still running in the tray.");
+                    NotifyHiddenInTray("Still running in the tray.");
                 }
             };
             Activated += async (s, e) =>
@@ -1330,6 +1334,7 @@ namespace Xm5ControlUi
         {
             minimizeToTray = true;
             startMinimizedToTray = false;
+            trayNoticeShown = false;
             string path = AppSettingsConfigPath();
             if (!File.Exists(path)) return;
 
@@ -1352,6 +1357,10 @@ namespace Xm5ControlUi
                     {
                         minimizeToTray = ParseBool(value);
                     }
+                    else if (string.Equals(key, "TrayNoticeShown", StringComparison.OrdinalIgnoreCase))
+                    {
+                        trayNoticeShown = ParseBool(value);
+                    }
                 }
             }
             catch
@@ -1368,7 +1377,8 @@ namespace Xm5ControlUi
                 File.WriteAllLines(path, new[]
                 {
                     "StartMinimizedInTray=" + (startMinimizedToTray ? "true" : "false"),
-                    "MinimizeToTrayOnClose=" + (minimizeToTray ? "true" : "false")
+                    "MinimizeToTrayOnClose=" + (minimizeToTray ? "true" : "false"),
+                    "TrayNoticeShown=" + (trayNoticeShown ? "true" : "false")
                 });
             }
             catch
@@ -1516,6 +1526,10 @@ namespace Xm5ControlUi
                     return;
                 }
 
+                // Turning the setting on is the moment the close button starts
+                // behaving differently, so the notice is owed again even if it
+                // has been shown before.
+                if (dialog.MinimizeToTrayOnClose && !minimizeToTray) trayNoticeShown = false;
                 startMinimizedToTray = dialog.StartMinimizedInTray;
                 minimizeToTray = dialog.MinimizeToTrayOnClose;
                 SaveAppPreferences();
@@ -2685,6 +2699,17 @@ namespace Xm5ControlUi
             }
         }
 
+        // Both routes into the tray - the close button and minimizing - say the
+        // same thing, so one notice covers them: whichever happens first
+        // explains it, and neither says it again.
+        private void NotifyHiddenInTray(string message)
+        {
+            if (trayNoticeShown) return;
+            trayNoticeShown = true;
+            SaveAppPreferences();
+            Notify(message);
+        }
+
         private void OnFormClosing(object sender, FormClosingEventArgs e)
         {
             if (!exiting && minimizeToTray && e.CloseReason == CloseReason.UserClosing)
@@ -2755,7 +2780,7 @@ namespace Xm5ControlUi
         private void HideToTrayFromClose()
         {
             ConcealMainWindow(removeFromTaskbar: true);
-            Notify("Quick controls are available in the tray.");
+            NotifyHiddenInTray("Quick controls are available in the tray.");
         }
 
         private void ConcealMainWindow(bool removeFromTaskbar)
