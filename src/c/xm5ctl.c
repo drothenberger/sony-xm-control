@@ -51,7 +51,8 @@ typedef struct {
 typedef struct {
     const char *action;
     const char *name_filter;
-    int timeout_ms;
+    int timeout_ms;         /* wait for an ack and a reply, once connected */
+    int connect_timeout_ms; /* opening the RFCOMM channel, which is far slower */
     const char *batch_text;
     uint8_t raw_payload[MAX_PAYLOAD];
     size_t raw_len;
@@ -82,6 +83,9 @@ static void print_usage(void) {
     puts("  xm5ctl anc");
     puts("  xm5ctl ambient 12");
     puts("  xm5ctl off");
+    puts("");
+    puts("  any command also takes [--timeout MS] for replies and");
+    puts("                        [--connect-timeout MS] for opening the channel");
 }
 
 static void die_wsa(const char *what) {
@@ -871,7 +875,27 @@ static bool parse_hex(const char *text, uint8_t *out, size_t out_cap, size_t *ou
 static bool parse_options(int argc, char **argv, options_t *opt) {
     ZeroMemory(opt, sizeof(*opt));
     opt->action = argc > 1 ? argv[1] : "help";
-    opt->timeout_ms = 5000;
+    /*
+     * Connecting and waiting for a reply want opposite things, so they get
+     * separate budgets.
+     *
+     * Opening the control channel takes about 280 ms when this PC is the only
+     * link to the headset but 1.8 s or more when a phone is connected to it as
+     * well, and a value that does not clear that fails every time rather than
+     * being merely slow. A successful connect returns as soon as the link is
+     * up, so a generous budget here costs nothing except how long a genuine
+     * failure takes to report.
+     *
+     * A reply, once connected, arrives in milliseconds. This budget is only
+     * ever spent in full by a command the headset does not answer at all,
+     * which is normal: a batch sweeps inquired types that not every model
+     * implements. Spending the connect budget on each of those instead turned
+     * a sixteen-command batch into eight seconds of held control channel.
+     *
+     * listen reuses timeout_ms as its capture duration.
+     */
+    opt->timeout_ms = 900;
+    opt->connect_timeout_ms = 5000;
     opt->data_type = 0x0c;
     opt->ambient_level = 10;
     opt->set_mode = -1;
@@ -909,6 +933,9 @@ static bool parse_options(int argc, char **argv, options_t *opt) {
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
             opt->timeout_ms = atoi(argv[++i]);
             if (opt->timeout_ms < 500) opt->timeout_ms = 500;
+        } else if (strcmp(argv[i], "--connect-timeout") == 0 && i + 1 < argc) {
+            opt->connect_timeout_ms = atoi(argv[++i]);
+            if (opt->connect_timeout_ms < 500) opt->connect_timeout_ms = 500;
         } else if (strcmp(argv[i], "--data-type") == 0 && i + 1 < argc) {
             const char *dt = argv[++i];
             if (strcmp(dt, "mdr2") == 0) opt->data_type = 0x0e;
@@ -976,7 +1003,7 @@ static int invoke_payload(const options_t *opt, const uint8_t *payload, size_t p
     mdr_frame_t responses[8];
     int count;
 
-    s = connect_best(opt->name_filter, opt->timeout_ms, selected, ARRAY_LEN(selected));
+    s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
         fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
         return 1;
@@ -1032,7 +1059,7 @@ static int invoke_batch(const options_t *opt) {
     }
     strcpy(text, opt->batch_text);
 
-    s = connect_best(opt->name_filter, opt->timeout_ms, selected, ARRAY_LEN(selected));
+    s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
         fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
         return 1;
@@ -1139,7 +1166,7 @@ static int invoke_ncasm_get(const options_t *opt) {
     ncasm_state_t st;
     uint8_t seq = 0;
 
-    s = connect_best(opt->name_filter, opt->timeout_ms, selected, ARRAY_LEN(selected));
+    s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
         fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
         return 1;
@@ -1172,7 +1199,7 @@ static int invoke_ncasm_set(const options_t *opt) {
     int count;
     uint8_t seq = 0;
 
-    s = connect_best(opt->name_filter, opt->timeout_ms, selected, ARRAY_LEN(selected));
+    s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
         fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
         return 1;
@@ -1242,7 +1269,7 @@ static int invoke_listen(const options_t *opt) {
     parser_t parser = { 0 };
     DWORD start;
 
-    s = connect_best(opt->name_filter, 4000, selected, ARRAY_LEN(selected));
+    s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
         fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
         return 1;
@@ -1276,7 +1303,7 @@ static int invoke_sequence(const options_t *opt, const uint8_t *first, size_t fi
     mdr_frame_t responses[8];
     int count;
 
-    s = connect_best(opt->name_filter, opt->timeout_ms, selected, ARRAY_LEN(selected));
+    s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
         fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
         return 1;
