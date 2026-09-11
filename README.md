@@ -23,6 +23,7 @@ Unofficial Windows controller for Sony 1000X headphones and earbuds.
 - DSEE Extreme Auto/Off
 - Bluetooth connection quality mode
 - Active codec display
+- Live sound pressure reading
 - Multipoint toggle
 - Speak-to-Chat toggle
 - Wearing sensor pause toggle
@@ -112,12 +113,33 @@ Off 0x00   Heavy 0x30   Clear 0x31   Hard 0x32   Soft 0x33
 Game 0x20  Manual 0xA0  Custom 1 0xA1   Custom 2 0xA2
 ```
 
+Sound pressure is the level of the audio playing through the headset,
+measured after the volume stage and ignoring noise cancelling. It is read
+with `5A 03` on `DATA_MDR_NO2` rather than `DATA_MDR`, which is why it is
+polled on its own rather than in the state batch. The reply is
+`5B 03 <dB> <status>`, where the level is a plain unsigned byte with no
+scaling and status `03` marks a real reading. Any other status means the
+headset has no level to report, which is what it answers while nothing is
+playing and for the first few seconds after playback starts, so it is shown
+as a dash rather than 0 dB. A dropped link is shown differently again: the last
+reading stays on screen and dims, because losing the link says nothing about
+whether anything is playing.
+
+The headset does not push the value, so it has to be asked, and asking once per
+reading does not work: opening the control channel can take longer than the
+interval worth asking for, as described below. One backend run therefore streams
+readings for as long as the meter is on screen instead of reconnecting for each
+one. Only one program can hold that channel at a time, so any command that talks
+to the headset stops the stream first and it resumes afterwards.
+
 Useful when adding support for a new model:
 
 ```text
 xm5ctl ncasm                 show the current noise control state
 xm5ctl listen --hex          dump notification frames as the headset sends them
 xm5ctl raw "66 19" --hex     send one payload and print the raw reply bytes
+xm5ctl soundpressure --samples 10
+                             read the sound pressure meter ten times
 ```
 
 The app has no Bluetooth code of its own: every action runs `xm5ctl` once and
