@@ -60,6 +60,8 @@ typedef struct {
     bool no_ack;
     bool ack_only;
     int ambient_level;
+    int samples;      /* soundpressure: readings taken per connection */
+    int interval_ms;  /* soundpressure: gap between those readings */
     /* NC/ambient changes; -1 leaves the current device value alone. */
     int set_mode;        /* 0 = off, 1 = anc, 2 = ambient */
     int set_level;       /* 0..20 */
@@ -77,6 +79,7 @@ static void print_usage(void) {
     puts("  xm5ctl ncasm [--timeout MS] [--name TEXT]");
     puts("  xm5ctl ncasm-set [--mode anc|ambient|off] [--level 0..20] [--voice on|off]");
     puts("                   [--auto on|off] [--sensitivity low|standard|high]");
+    puts("  xm5ctl soundpressure [--samples N] [--interval MS] [--timeout MS]");
     puts("  xm5ctl listen [--timeout MS] [--hex]");
     puts("  xm5ctl raw \"22 00\" [--data-type mdr|mdr2] [--ack-only] [--no-ack]");
     puts("  xm5ctl batch \"22 00;66 17;E6 01\" [--timeout MS] [--name TEXT]");
@@ -543,6 +546,22 @@ static void print_device_info(const uint8_t *json, size_t len) {
     }
 }
 
+/*
+ * Live sound pressure: the dB level of the audio playing through the headset,
+ * measured after the volume stage and ignoring noise cancelling. Status 0x03
+ * marks a real reading; anything else means the headset has none to give,
+ * which is what it reports whenever nothing is playing and for the first few
+ * seconds after playback starts. That is "no reading", not zero, so it must
+ * never be rendered as 0 dB.
+ */
+static void print_sound_pressure(const uint8_t *p, size_t n) {
+    if (n < 4 || p[3] != 0x03 || p[2] == 0xff) {
+        puts("sound pressure: none");
+        return;
+    }
+    printf("sound pressure: %u dB\n", p[2]);
+}
+
 static void print_known_payload(const mdr_frame_t *frame) {
     const uint8_t *p = frame->payload;
     size_t n = frame->payload_len;
@@ -559,6 +578,16 @@ static void print_known_payload(const mdr_frame_t *frame) {
     }
     if (n == 0) {
         printf("%s seq=%u empty\n", data_type_name(frame->data_type), frame->sequence);
+        return;
+    }
+
+    /*
+     * 0x5b covers a whole family; inquired type 0x03 is the sound pressure
+     * meter and 0x00 is the equalizer band layout, which the caller reads off
+     * the raw payload line below.
+     */
+    if (p[0] == 0x5b && n >= 2 && p[1] == 0x03) {
+        print_sound_pressure(p, n);
         return;
     }
 
@@ -898,6 +927,8 @@ static bool parse_options(int argc, char **argv, options_t *opt) {
     opt->connect_timeout_ms = 5000;
     opt->data_type = 0x0c;
     opt->ambient_level = 10;
+    opt->samples = 1;
+    opt->interval_ms = 1000;
     opt->set_mode = -1;
     opt->set_level = -1;
     opt->set_voice = -1;
@@ -982,6 +1013,12 @@ static bool parse_options(int argc, char **argv, options_t *opt) {
                 return false;
             }
             opt->set_sensitivity = (int)sens;
+        } else if (strcmp(argv[i], "--samples") == 0 && i + 1 < argc) {
+            opt->samples = atoi(argv[++i]);
+            if (opt->samples < 1) opt->samples = 1;
+        } else if (strcmp(argv[i], "--interval") == 0 && i + 1 < argc) {
+            opt->interval_ms = atoi(argv[++i]);
+            if (opt->interval_ms < 0) opt->interval_ms = 0;
         } else if (strcmp(argv[i], "--hex") == 0) {
             g_hex_dump = true;
         } else if (strcmp(argv[i], "--no-ack") == 0) {
@@ -1263,6 +1300,53 @@ static int invoke_ncasm_set(const options_t *opt) {
     return 0;
 }
 
+/*
+ * Poll the live sound pressure meter. It answers on DATA_MDR_NO2 rather than
+ * DATA_MDR, which is why this cannot ride along in the state batch. Sound
+ * Connect reads it about once a second; --samples keeps that cadence on a
+ * single connection so a run of readings costs one RFCOMM setup instead of
+ * one per reading.
+ */
+static int invoke_sound_pressure(const options_t *opt) {
+    static const uint8_t payload[] = { 0x5a, 0x03 };
+    SOCKET s;
+    wchar_t selected[BLUETOOTH_MAX_NAME_SIZE] = L"";
+
+    s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
+    if (s == INVALID_SOCKET) {
+        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        return 1;
+    }
+
+    wprintf(L"Connecting to %ls, protocol v2...\n", selected[0] ? selected : L"<unnamed>");
+
+    for (int sample = 0; sample < opt->samples; sample++) {
+        mdr_frame_t responses[8];
+        int count;
+
+        if (sample > 0 && opt->interval_ms > 0) {
+            Sleep((DWORD)opt->interval_ms);
+        }
+
+        count = send_payload_seq(s, payload, sizeof(payload), 0x0e, (uint8_t)(sample & 1),
+                                 opt->timeout_ms, opt->no_ack, 0x5b, responses, (int)ARRAY_LEN(responses));
+        if (count < 0) {
+            closesocket(s);
+            return 1;
+        }
+        if (count == 0) {
+            puts("No response before timeout.");
+        }
+        for (int i = 0; i < count; i++) {
+            print_known_payload(&responses[i]);
+        }
+        fflush(stdout);
+    }
+
+    closesocket(s);
+    return 0;
+}
+
 static int invoke_listen(const options_t *opt) {
     SOCKET s;
     wchar_t selected[BLUETOOTH_MAX_NAME_SIZE] = L"";
@@ -1365,6 +1449,8 @@ int main(int argc, char **argv) {
         rc = invoke_ncasm_set(&opt);
     } else if (strcmp(opt.action, "raw") == 0) {
         rc = invoke_payload(&opt, opt.raw_payload, opt.raw_len, opt.data_type, opt.ack_only ? -2 : -1);
+    } else if (strcmp(opt.action, "soundpressure") == 0) {
+        rc = invoke_sound_pressure(&opt);
     } else if (strcmp(opt.action, "listen") == 0) {
         rc = invoke_listen(&opt);
     } else if (strcmp(opt.action, "batch") == 0) {
