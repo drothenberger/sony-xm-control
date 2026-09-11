@@ -290,6 +290,20 @@ namespace Xm5ControlUi
         private const int EqRowHeight = 33;
         private const int EqBaselineRows = 3;
         private const int EqExtraRowPadding = 12;
+        // Sound Connect reads the meter at about 1 Hz, and the streaming run
+        // below keeps that cadence without paying to reopen the control channel
+        // for each reading.
+        private const int MeterStreamIntervalMs = 800;
+        // Only the wait for each reading; the backend budgets the connect
+        // separately, which is the slow part.
+        private const int MeterStreamTimeoutMs = 1500;
+        // Long enough that the stream is limited by the supervisor rather than
+        // by running out of samples: a day at the interval above.
+        private const int MeterStreamSamples = 108000;
+        private const int MeterSupervisorIntervalMs = 1000;
+        private const int MeterStaleAfterMs = 4000;
+        private const int MeterRestartDelayMs = 2000;
+        private const int MeterStopWaitMs = 1500;
         private const int BackendCommandPaceMs = 450;
         private const string StateBatchTail = "D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05\"";
 
@@ -325,9 +339,11 @@ namespace Xm5ControlUi
         private readonly SemaphoreSlim commandGate = new SemaphoreSlim(1, 1);
         private readonly System.Windows.Forms.Timer autoDetectTimer;
         private readonly System.Windows.Forms.Timer liveEqTimer;
+        private readonly System.Windows.Forms.Timer meterSupervisorTimer;
 
         private DeviceProfile currentProfile;
         private DeviceProfile lastStateRefreshProfile;
+        private DeviceProfile soundPressureProbedProfile;
         private DateTime lastStateRefreshAt = DateTime.MinValue;
         private bool exiting;
         private bool minimizeToTray = true;
@@ -336,6 +352,12 @@ namespace Xm5ControlUi
         private bool trayNotifications = true;
         private bool trayCleanupStarted;
         private bool commandBusy;
+        private Process meterProcess;
+        private bool meterGateHeld;
+        private bool meterStale;
+        private DateTime lastMeterReadingAt = DateTime.MinValue;
+        private DateTime meterStreamFailedAt = DateTime.MinValue;
+        private bool soundPressureUnsupported;
         private bool autoDetectRunning;
         private bool lastStateRefreshConnected;
         private bool immediateExitQueued;
@@ -354,9 +376,17 @@ namespace Xm5ControlUi
         private Label dseeLabel;
         private Label connectionQualityLabel;
         private Label codecLabel;
+        private Label soundPressureLabel;
+        private Label soundPressureCaption;
         private PillButton lowLatencyButton;
         private bool lowLatencyActive;
         private const string LowLatencyHint = "Use Sound Connect to turn Low Latency on and off.";
+        // An em dash, not "0 dB": the headset reports no reading at all when
+        // nothing is playing, and for a few seconds after playback starts.
+        private const string NoSoundPressureText = "\u2014";
+        private const string SoundPressureHint =
+            "Level of the audio playing through the headset, ignoring noise cancelling.\r\n" +
+            "Shows \u2014 while nothing is playing, and for a few seconds after playback starts.";
         private Label speakToChatLabel;
         private Label wearPauseLabel;
         private Label touchPanelLabel;
@@ -482,6 +512,8 @@ namespace Xm5ControlUi
 
             autoDetectTimer = new System.Windows.Forms.Timer { Interval = AutoDetectIntervalMs };
             autoDetectTimer.Tick += async (s, e) => await RunUiTaskAsync(AutoDetectTickAsync);
+            meterSupervisorTimer = new System.Windows.Forms.Timer { Interval = MeterSupervisorIntervalMs };
+            meterSupervisorTimer.Tick += (s, e) => MeterSupervisorTick();
             liveEqTimer = new System.Windows.Forms.Timer { Interval = LiveEqDebounceMs };
             liveEqTimer.Tick += async (s, e) => await RunUiTaskAsync(async () =>
             {
@@ -513,6 +545,7 @@ namespace Xm5ControlUi
                 }
                 await RunUiTaskAsync(RefreshAllAsync);
                 if (!IsClosing) autoDetectTimer.Start();
+                if (!IsClosing) meterSupervisorTimer.Start();
             };
         }
 
@@ -656,11 +689,50 @@ namespace Xm5ControlUi
             toolTip.SetToolTip(appSettingsButton, "App settings");
             header.Controls.Add(appSettingsButton);
 
+            // The live meter goes in the header rather than in a Settings row: it
+            // is the one value on screen that moves second to second, and every
+            // card below is already packed to the bottom of the window.
+            soundPressureCaption = new Label
+            {
+                Text = "Sound pressure",
+                ForeColor = Color.FromArgb(190, 198, 207),
+                Font = new Font("Segoe UI Semibold", 9.2f),
+                AutoSize = false,
+                Size = new Size(220, 18),
+                TextAlign = ContentAlignment.MiddleRight,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            header.Controls.Add(soundPressureCaption);
+
+            soundPressureLabel = new Label
+            {
+                Text = NoSoundPressureText,
+                ForeColor = ink,
+                Font = new Font("Segoe UI Semibold", 15f),
+                AutoSize = false,
+                Size = new Size(220, 30),
+                TextAlign = ContentAlignment.MiddleRight,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            header.Controls.Add(soundPressureLabel);
+            toolTip.SetToolTip(soundPressureLabel, SoundPressureHint);
+            toolTip.SetToolTip(soundPressureCaption, SoundPressureHint);
+
             Action layoutHeader = () =>
             {
                 if (appSettingsButton != null && !appSettingsButton.IsDisposed)
                 {
                     appSettingsButton.Location = new Point(header.Width - appSettingsButton.Width - 22, 16);
+                }
+
+                int meterRight = header.Width - 22 - (appSettingsButton != null ? appSettingsButton.Width + 20 : 0);
+                if (soundPressureCaption != null && !soundPressureCaption.IsDisposed)
+                {
+                    soundPressureCaption.Location = new Point(meterRight - soundPressureCaption.Width, 6);
+                }
+                if (soundPressureLabel != null && !soundPressureLabel.IsDisposed)
+                {
+                    soundPressureLabel.Location = new Point(meterRight - soundPressureLabel.Width, 24);
                 }
             };
             header.Resize += (s, e) => layoutHeader();
@@ -2180,6 +2252,206 @@ namespace Xm5ControlUi
             lastStateRefreshAt = DateTime.UtcNow;
         }
 
+        // The meter answers on DATA_MDR_NO2, so it cannot ride along in the
+        // state batch, which is DATA_MDR. It also cannot be polled by running
+        // the backend once per reading: opening the control channel costs about
+        // 280 ms when this PC is the only link to the headset, but around 1.8 s
+        // when a phone is connected as well, which is longer than the interval
+        // being asked for. So one backend run streams readings for as long as
+        // the meter is wanted, and pays that cost once.
+        //
+        // Only one program can hold the control channel at a time, so the
+        // stream holds the command gate for its lifetime and every other
+        // command stops it first. The supervisor tick below restarts it once
+        // that command is done.
+        private void MeterSupervisorTick()
+        {
+            if (IsClosing) return;
+
+            // Support is a protocol capability, not a form factor, so it is
+            // probed rather than inferred from the model name.
+            if (!ReferenceEquals(soundPressureProbedProfile, currentProfile))
+            {
+                soundPressureProbedProfile = currentProfile;
+                SetSoundPressureSupported(true);
+            }
+
+            if (!ShouldRunMeter())
+            {
+                if (meterProcess != null) StopMeterStream();
+                return;
+            }
+
+            if (meterProcess != null)
+            {
+                // A reading every interval is expected; going quiet for several
+                // means the link is struggling rather than that nothing is
+                // playing, and the two have to look different on screen.
+                if (DateTime.UtcNow - lastMeterReadingAt > TimeSpan.FromMilliseconds(MeterStaleAfterMs))
+                {
+                    SetMeterStale(true);
+                }
+                return;
+            }
+
+            // Do not fight a command for the gate; the next tick will retry.
+            if (commandBusy) return;
+            if (DateTime.UtcNow - meterStreamFailedAt < TimeSpan.FromMilliseconds(MeterRestartDelayMs)) return;
+            StartMeterStream();
+        }
+
+        private bool ShouldRunMeter()
+        {
+            if (IsClosing || soundPressureUnsupported) return false;
+            if (!lastStateRefreshConnected) return false;
+            // Nothing to read while the window is in the tray, and holding the
+            // control channel there would keep the phone app off it for a
+            // number nobody can see.
+            return WindowIsShowing;
+        }
+
+        private void StartMeterStream()
+        {
+            if (meterProcess != null || !File.Exists(backendPath)) return;
+            // The gate is what keeps this and the ordinary commands off the
+            // control channel at the same time.
+            if (!commandGate.Wait(0)) return;
+
+            Process process = null;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = backendPath,
+                    Arguments = WithDevice("soundpressure --samples " + MeterStreamSamples +
+                                           " --interval " + MeterStreamIntervalMs +
+                                           " --timeout " + MeterStreamTimeoutMs),
+                    WorkingDirectory = Path.GetDirectoryName(backendPath),
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                process.OutputDataReceived += (s, e) =>
+                {
+                    if (e.Data != null) PostToUi(() => OnMeterLine(e.Data));
+                };
+                process.Exited += (s, e) => PostToUi(OnMeterStreamExited);
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                meterProcess = process;
+                meterGateHeld = true;
+                lastMeterReadingAt = DateTime.UtcNow;
+            }
+            catch
+            {
+                if (process != null) process.Dispose();
+                meterProcess = null;
+                meterStreamFailedAt = DateTime.UtcNow;
+                meterGateHeld = false;
+                commandGate.Release();
+            }
+        }
+
+        // Safe to call when nothing is running, and safe to call twice.
+        private void StopMeterStream()
+        {
+            var process = meterProcess;
+            meterProcess = null;
+            if (process != null)
+            {
+                try
+                {
+                    if (!process.HasExited) process.Kill();
+                }
+                catch
+                {
+                }
+                try
+                {
+                    process.WaitForExit(MeterStopWaitMs);
+                }
+                catch
+                {
+                }
+                try
+                {
+                    process.Dispose();
+                }
+                catch
+                {
+                }
+            }
+            if (meterGateHeld)
+            {
+                meterGateHeld = false;
+                commandGate.Release();
+            }
+        }
+
+        private void OnMeterStreamExited()
+        {
+            // The backend gives up when the link drops. Let go of the gate and
+            // let the supervisor try again after a pause; the reading on screen
+            // goes stale rather than blank, because a lost link says nothing
+            // about whether anything is playing.
+            if (meterProcess == null) return;
+            StopMeterStream();
+            // Only an unplanned exit earns a pause before reconnecting. A stop
+            // made to let a command through should be picked straight back up.
+            meterStreamFailedAt = DateTime.UtcNow;
+            SetMeterStale(true);
+        }
+
+        private void OnMeterLine(string line)
+        {
+            if (IsClosing || string.IsNullOrEmpty(line)) return;
+
+            var match = Regex.Match(line, @"^sound pressure:\s*(.+?)\s*$", RegexOptions.IgnoreCase);
+            if (!match.Success) return;
+
+            lastMeterReadingAt = DateTime.UtcNow;
+            SetMeterStale(false);
+
+            // "none" is a real answer, not a failure: the headset has no level
+            // to report while nothing is playing.
+            var level = Regex.Match(match.Groups[1].Value, @"^(\d+)\s*dB$", RegexOptions.IgnoreCase);
+            SetSoundPressureText(level.Success ? level.Groups[1].Value + " dB" : NoSoundPressureText);
+        }
+
+        private void SetMeterStale(bool stale)
+        {
+            if (meterStale == stale) return;
+            meterStale = stale;
+            if (soundPressureLabel != null && !soundPressureLabel.IsDisposed)
+            {
+                soundPressureLabel.ForeColor = stale ? subdued : ink;
+            }
+        }
+
+        private void SetSoundPressureSupported(bool supported)
+        {
+            soundPressureUnsupported = !supported;
+            if (soundPressureCaption != null && !soundPressureCaption.IsDisposed)
+            {
+                soundPressureCaption.Visible = supported;
+            }
+            if (soundPressureLabel != null && !soundPressureLabel.IsDisposed)
+            {
+                soundPressureLabel.Visible = supported;
+            }
+            if (!supported) SetSoundPressureText(NoSoundPressureText);
+        }
+
+        private void SetSoundPressureText(string text)
+        {
+            if (soundPressureLabel == null || soundPressureLabel.IsDisposed) return;
+            if (soundPressureLabel.Text != text) soundPressureLabel.Text = text;
+        }
+
         private void ParseCodec(string output)
         {
             if (codecLabel == null) return;
@@ -3169,7 +3441,11 @@ namespace Xm5ControlUi
             }
 
             bool channel = UsesControlChannel(args);
-            if (channel) await commandGate.WaitAsync();
+            if (channel)
+            {
+                StopMeterStream();
+                await commandGate.WaitAsync();
+            }
             if (IsClosing)
             {
                 if (channel) commandGate.Release();
@@ -3202,6 +3478,9 @@ namespace Xm5ControlUi
         {
             if (IsClosing) return "";
             if (!File.Exists(backendPath)) return "";
+            // A scan never touches the control channel, so it must not wait on
+            // the gate or cut the meter stream short; it would otherwise be
+            // starved by the stream that holds the gate.
             if (!UsesControlChannel(args))
             {
                 try
@@ -3215,6 +3494,7 @@ namespace Xm5ControlUi
                 }
             }
 
+            StopMeterStream();
             if (!commandGate.Wait(0)) return null;
             try
             {
@@ -3236,6 +3516,7 @@ namespace Xm5ControlUi
             if (IsClosing) return "";
             if (!File.Exists(backendPath)) return "";
 
+            StopMeterStream();
             await commandGate.WaitAsync();
             if (IsClosing)
             {
@@ -3407,6 +3688,11 @@ namespace Xm5ControlUi
             {
                 liveEqTimer.Stop();
             }
+            if (meterSupervisorTimer != null)
+            {
+                meterSupervisorTimer.Stop();
+            }
+            StopMeterStream();
             if (trayMenu != null && trayMenu.Visible)
             {
                 trayMenu.Close(ToolStripDropDownCloseReason.CloseCalled);
@@ -3430,6 +3716,7 @@ namespace Xm5ControlUi
 
             if (autoDetectTimer != null) autoDetectTimer.Dispose();
             if (liveEqTimer != null) liveEqTimer.Dispose();
+            if (meterSupervisorTimer != null) meterSupervisorTimer.Dispose();
             if (trayIcon != null)
             {
                 trayIcon.ContextMenuStrip = null;
