@@ -333,7 +333,20 @@ namespace Xm5ControlUi
         // channel the stream already holds.
         private const int MeterStreamSafeListeningEvery = 5;
         private const int MeterSupervisorIntervalMs = 1000;
-        private const int MeterStaleAfterMs = 4000;
+        // How long a reading may be overdue before the display says so. It has
+        // to clear the longest gap that ordinary operation produces, which is a
+        // command borrowing the channel and the stream reconnecting behind it:
+        // the state batch alone is 3.1 s, and reconnecting costs about 1.8 s
+        // while a phone is streaming to the headset, measured at gaps of 4.4 to
+        // 5.9 s in that case against 2.4 to 3.2 s when the PC is the source.
+        // Worst case is the batch plus a full connect timeout, near 8 s.
+        //
+        // Set below that, the icon dims on every state refresh and flickers
+        // several times a minute for no reason. Set here, the only thing that
+        // waits is a stream that is alive but has gone quiet; a stream that
+        // actually dies exits, and that path marks it stale at once whatever
+        // this says.
+        private const int MeterStaleAfterMs = 10000;
         private const int MeterRestartDelayMs = 2000;
         private const int MeterStopWaitMs = 1500;
         private const int BackendCommandPaceMs = 450;
@@ -4022,6 +4035,14 @@ namespace Xm5ControlUi
         {
             if (trayCleanupStarted) return;
             trayCleanupStarted = true;
+
+            // First, because it is the only thing here that outlives the
+            // process. Exiting from the tray menu reaches this without going
+            // through OnFormClosing, so this is the one place that covers both
+            // routes out; miss it and the backend keeps running with no owner,
+            // holding the headset's control channel until someone notices and
+            // kills it by hand.
+            StopMeterStream();
 
             if (sessionSwitchHandler != null)
             {
