@@ -1737,6 +1737,12 @@ namespace Xm5ControlUi
             {
                 title += " - paused";
             }
+            else if (trayMeterEnabled && controlInUse)
+            {
+                // Said instead of a reading: any number left on the icon is
+                // old, and "not updating" would not say what to do about it.
+                title += " - headset in use by another app";
+            }
             else if (trayMeterEnabled && trayMeterDigits != null)
             {
                 title += trayMeterDigits == NoSoundPressureText
@@ -2602,6 +2608,12 @@ namespace Xm5ControlUi
                 {
                     if (e.Data != null) PostToUi(() => OnMeterLine(e.Data));
                 };
+                // The window is usually hidden while this runs, so its status
+                // line cannot say why the stream will not start; the tooltip can.
+                process.ErrorDataReceived += (s, e) =>
+                {
+                    if (IsControlInUse(e.Data)) PostToUi(() => { controlInUse = true; RefreshTrayMeter(); });
+                };
                 process.Exited += (s, e) => PostToUi(OnMeterStreamExited);
                 process.Start();
                 process.BeginOutputReadLine();
@@ -2698,6 +2710,7 @@ namespace Xm5ControlUi
             if (!match.Success) return;
 
             lastMeterReadingAt = DateTime.UtcNow;
+            controlInUse = false;
             SetMeterStale(false);
 
             // Still a sign the stream is alive, but not a level: with Safe
