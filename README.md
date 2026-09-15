@@ -168,6 +168,10 @@ than with the connection. While nothing is refreshing it — the meter off or
 paused, or the desktop locked — the last reading stays and says how old it is
 once it is more than five minutes out of date.
 
+The tray digits turn yellow when the lower earbud drops below 20% and red below
+10%. Only a recent reading colours them, and dimming for a stalled reading takes
+precedence, so grey still means only that the number has stopped updating.
+
 The icon has four appearances and they are meant to be told apart: bright
 digits for a live reading, a bright dash when nothing is playing, two bright
 bars when paused, and dimmed digits when the reading has stopped being
