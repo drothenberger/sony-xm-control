@@ -316,8 +316,12 @@ namespace Xm5ControlUi
         // Yellow rather than amber because amber and red differ mostly in hue,
         // which red/green colour blindness hides; yellow is far brighter than
         // red, and a difference in lightness survives.
-        private const int BatteryLowPercent = 20;
-        private const int BatteryCriticalPercent = 10;
+        // Red matches where the WF-1000XM6's Auto Power Save starts switching
+        // features off (below 20%, per Sony), and yellow comes early enough to
+        // warn before that - the same 30% at which the case light starts
+        // flashing orange for a low earbud.
+        private const int BatteryLowPercent = 30;
+        private const int BatteryCriticalPercent = 20;
         private const int MeterSupervisorIntervalMs = 1000;
         // How long a reading may be overdue before the display says so. It has
         // to clear the longest gap that ordinary operation produces, which is a
