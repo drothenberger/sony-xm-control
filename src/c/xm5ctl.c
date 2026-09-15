@@ -62,6 +62,8 @@ typedef struct {
     int ambient_level;
     int samples;      /* soundpressure: readings taken per connection */
     int interval_ms;  /* soundpressure: gap between those readings */
+    const char *battery_text; /* soundpressure: battery queries asked alongside */
+    int battery_every;        /* soundpressure: readings between those queries */
     int safe_listening_every; /* soundpressure: readings between 52 03 checks, 0 = never */
     /* NC/ambient changes; -1 leaves the current device value alone. */
     int set_mode;        /* 0 = off, 1 = anc, 2 = ambient */
@@ -81,6 +83,7 @@ static void print_usage(void) {
     puts("  xm5ctl ncasm-set [--mode anc|ambient|off] [--level 0..20] [--voice on|off]");
     puts("                   [--auto on|off] [--sensitivity low|standard|high]");
     puts("  xm5ctl soundpressure [--samples N] [--interval MS] [--timeout MS]");
+    puts("                       [--battery \"22 01;22 02\"] [--battery-every N]");
     puts("                       [--safe-listening-every N]");
     puts("  xm5ctl listen [--timeout MS] [--hex]");
     puts("  xm5ctl raw \"22 00\" [--data-type mdr|mdr2] [--ack-only] [--no-ack]");
@@ -1037,6 +1040,11 @@ static bool parse_options(int argc, char **argv, options_t *opt) {
         } else if (strcmp(argv[i], "--interval") == 0 && i + 1 < argc) {
             opt->interval_ms = atoi(argv[++i]);
             if (opt->interval_ms < 0) opt->interval_ms = 0;
+        } else if (strcmp(argv[i], "--battery") == 0 && i + 1 < argc) {
+            opt->battery_text = argv[++i];
+        } else if (strcmp(argv[i], "--battery-every") == 0 && i + 1 < argc) {
+            opt->battery_every = atoi(argv[++i]);
+            if (opt->battery_every < 1) opt->battery_every = 1;
         } else if (strcmp(argv[i], "--safe-listening-every") == 0 && i + 1 < argc) {
             opt->safe_listening_every = atoi(argv[++i]);
             if (opt->safe_listening_every < 0) opt->safe_listening_every = 0;
@@ -1328,17 +1336,49 @@ static int invoke_ncasm_set(const options_t *opt) {
  * single connection so a run of readings costs one RFCOMM setup instead of
  * one per reading.
  *
- * --safe-listening-every asks 52 03 before the first reading and every N
- * readings after, on the same connection, so the caller can tell a frozen
- * level from a live one.
+ * --battery asks the given DATA_MDR battery queries on the first reading and
+ * every --battery-every readings after that. The data type travels in each
+ * frame, not with the connection, so both kinds share the one socket and one
+ * alternating sequence bit; on the WF-1000XM6 the replies come back in tens of
+ * milliseconds without disturbing the readings. This is what lets something
+ * holding the channel for the meter report battery too, rather than a second
+ * session having to take the channel for it.
+ *
+ * --safe-listening-every asks 52 03 the same way, before the first reading and
+ * every N readings after, so the caller can tell a frozen level from a live one.
  */
 static int invoke_sound_pressure(const options_t *opt) {
     static const uint8_t payload[] = { 0x5a, 0x03 };
     static const uint8_t safe_listening[] = { 0x52, 0x03 };
+    uint8_t battery[4][MAX_PAYLOAD];
+    size_t battery_len[4];
+    int battery_count = 0;
+    int battery_every = opt->battery_every > 0 ? opt->battery_every : 60;
     int safe_listening_every = opt->safe_listening_every;
     uint8_t seq = 0;
     SOCKET s;
     wchar_t selected[BLUETOOTH_MAX_NAME_SIZE] = L"";
+
+    if (opt->battery_text) {
+        char text[256];
+        char *part;
+        char *context = NULL;
+
+        if (strlen(opt->battery_text) >= sizeof(text)) {
+            fprintf(stderr, "battery payload list is too long.\n");
+            return 2;
+        }
+        strcpy(text, opt->battery_text);
+        for (part = strtok_s(text, ";", &context); part; part = strtok_s(NULL, ";", &context)) {
+            if (battery_count >= (int)ARRAY_LEN(battery) ||
+                !parse_hex(part, battery[battery_count], sizeof(battery[0]), &battery_len[battery_count]) ||
+                battery_len[battery_count] == 0) {
+                fprintf(stderr, "invalid battery payload: %s\n", part);
+                return 2;
+            }
+            battery_count++;
+        }
+    }
 
     s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
@@ -1356,17 +1396,37 @@ static int invoke_sound_pressure(const options_t *opt) {
             Sleep((DWORD)opt->interval_ms);
         }
 
+        if (battery_count > 0 && sample % battery_every == 0) {
+            for (int b = 0; b < battery_count; b++) {
+                count = send_payload_seq(s, battery[b], battery_len[b], 0x0c, seq, opt->timeout_ms, opt->no_ack,
+                                         expected_for_payload(battery[b], battery_len[b]),
+                                         responses, (int)ARRAY_LEN(responses));
+                seq ^= 1;
+                /*
+                 * A refused query reads the same as a dropped link here. Stop
+                 * asking rather than ending the run: the meter is what the
+                 * session is for, and a real link failure will end it on the
+                 * next reading anyway.
+                 */
+                if (count < 0) {
+                    battery_count = 0;
+                    break;
+                }
+                for (int i = 0; i < count; i++) {
+                    print_known_payload(&responses[i]);
+                }
+            }
+        }
+
         if (safe_listening_every > 0 && sample % safe_listening_every == 0) {
             count = send_payload_seq(s, safe_listening, sizeof(safe_listening), 0x0e, seq,
                                      opt->timeout_ms, opt->no_ack, 0x53, responses, (int)ARRAY_LEN(responses));
             seq ^= 1;
-            if (count < 0) {
-                closesocket(s);
-                return 1;
+            /* Same reasoning as the battery queries above, and a model that
+               never answers would otherwise cost a full timeout each time. */
+            if (count <= 0) {
+                safe_listening_every = 0;
             }
-            /* A model without it would otherwise cost a full timeout every
-               time it is asked. */
-            if (count == 0) safe_listening_every = 0;
             for (int i = 0; i < count; i++) {
                 print_known_payload(&responses[i]);
             }

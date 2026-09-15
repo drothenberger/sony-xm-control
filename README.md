@@ -161,6 +161,13 @@ the screen is locked anyway. It does not care which device is playing — the
 level of something streaming from a phone is readable here too, since the
 control channel is separate from the audio.
 
+Hovering over the tray icon shows the battery levels as well. While the tray
+meter runs, the stream asks for battery about once a minute on the connection it
+already holds, which works because the data type travels in each frame rather
+than with the connection. While nothing is refreshing it — the meter off or
+paused, or the desktop locked — the last reading stays and says how old it is
+once it is more than five minutes out of date.
+
 The icon has four appearances and they are meant to be told apart: bright
 digits for a live reading, a bright dash when nothing is playing, two bright
 bars when paused, and dimmed digits when the reading has stopped being
