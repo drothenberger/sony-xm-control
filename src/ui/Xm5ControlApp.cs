@@ -368,7 +368,9 @@ namespace Xm5ControlUi
         private const int MeterRestartDelayMs = 2000;
         private const int MeterStopWaitMs = 1500;
         private const int BackendCommandPaceMs = 450;
-        private const string StateBatchTail = "D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05\"";
+        // 36 02 is the paired-device list, and it is the one read here that lives
+        // on DATA_MDR_NO2 rather than DATA_MDR.
+        private const string StateBatchTail = "D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05;mdr2:36 02\"";
 
         // 66 19 is the WF-1000XM6 noise control state; 66 17 covers older models.
         // Which one a model answers is a protocol capability rather than a form
@@ -498,9 +500,12 @@ namespace Xm5ControlUi
         private Label dseeLabel;
         private Label connectionQualityLabel;
         private Label codecLabel;
-        // Whether the codec shown came from the headset, as opposed to the
-        // row's "Waiting" or a note that it is not being reported.
-        private bool codecReported;
+        private string codecText;
+        // The codec shown is the last one reported, and it has since stopped
+        // being reported: a bud went into the case.
+        private bool codecStale;
+        private string activeDeviceText;
+        private readonly Dictionary<int, string> deviceSlotNames = new Dictionary<int, string>();
         private Label soundPressureLabel;
         private Label soundPressureCaption;
         private PillButton lowLatencyButton;
@@ -2284,6 +2289,8 @@ namespace Xm5ControlUi
             // Which NCASM inquired type answers is a property of the device, so a
             // different one has to prove it again.
             if (changed) ncasmTypeSeen = 0;
+            // Both belong to the headset that answered, not to this app.
+            if (changed) { codecText = null; activeDeviceText = null; codecStale = false; }
             // Another headset's battery is not this one's.
             if (changed)
             {
@@ -2451,6 +2458,7 @@ namespace Xm5ControlUi
             }
             ParseBattery(output);
             ParseCodec(output);
+            ParseActiveDevice(output);
             ParseMode(output);
             ParseExtraSettings(output);
         }
@@ -2470,6 +2478,7 @@ namespace Xm5ControlUi
             if (connectionLabel != null) connectionLabel.Text = "Connected";
             ParseBattery(output);
             ParseCodec(output);
+            ParseActiveDevice(output);
             ParseMode(output);
             ParseExtraSettings(output);
             MarkStateRefreshed(detection);
@@ -2713,6 +2722,16 @@ namespace Xm5ControlUi
                 return;
             }
 
+            // The headset pushes its device list whenever the playing device
+            // changes, unasked, on the same channel the meter is holding. Taking
+            // it here is what makes the codec row follow a source change at once
+            // instead of at the next refresh.
+            if (line.StartsWith("device", StringComparison.OrdinalIgnoreCase))
+            {
+                ParseDeviceLine(line);
+                return;
+            }
+
             var safeListening = Regex.Match(line, @"^safe listening:\s*(on|off)\s*$", RegexOptions.IgnoreCase);
             if (safeListening.Success)
             {
@@ -2932,25 +2951,85 @@ namespace Xm5ControlUi
             if (match.Success)
             {
                 string value = match.Groups[1].Value;
-                // The headset reports the codec of whichever connection is playing,
-                // so on a multipoint setup this follows the active device.
-                codecLabel.Text = value.Equals("unknown", StringComparison.OrdinalIgnoreCase) ? "Unknown" : value;
-                codecLabel.ForeColor = subdued;
-                codecReported = true;
-                return;
+                codecText = value.Equals("unknown", StringComparison.OrdinalIgnoreCase) ? "Unknown" : value;
+                codecStale = false;
             }
-
             // The WF-1000XM6 leaves the device information request unanswered
             // for as long as either bud sits in the case (verified with each
             // bud, in both connection quality settings), while still answering
             // the battery request in the same batch with that bud at 0%. Any
             // other missing reply is left to look like one.
-            if (!Regex.IsMatch(output, @"(?m)^battery:\s*left\s*(0%|.*right\s*0%)", RegexOptions.IgnoreCase)) return;
+            else if (Regex.IsMatch(output, @"(?m)^battery:\s*left\s*(0%|.*right\s*0%)", RegexOptions.IgnoreCase))
+            {
+                codecStale = true;
+            }
+            else
+            {
+                return;
+            }
+            ShowCodecRow();
+        }
+
+        // The headset lists every device it is paired with, each in a connection
+        // slot, and names the slot of the one playing. Slot 0 means the device is
+        // not connected, so it can never be the active one.
+        private void ParseActiveDevice(string output)
+        {
+            foreach (var line in output.Split('\n')) ParseDeviceLine(line);
+        }
+
+        // Fed a line at a time, because the same lines arrive two ways: in a
+        // state batch, and unasked down the meter stream when the headset
+        // changes source. The records come first and the active slot last, so
+        // slots are collected until that line resolves them.
+        private void ParseDeviceLine(string line)
+        {
+            var device = Regex.Match(line,
+                @"^device:\s*slot\s*(\d+);\s*addr\s*\S+;\s*(connected|not connected)(;\s*this pc)?;\s*name\s*(.*?)\s*$",
+                RegexOptions.IgnoreCase);
+            if (device.Success)
+            {
+                int slot;
+                if (!int.TryParse(device.Groups[1].Value, out slot) || slot == 0) return;
+                string name = device.Groups[4].Value;
+                if (name.Length == 0) name = "Unnamed device";
+                // Saying "this PC" is worth the width: the name the headset
+                // holds is whatever the machine was called when it was paired.
+                deviceSlotNames[slot] = device.Groups[3].Success ? name + " (this PC)" : name;
+                return;
+            }
+
+            var active = Regex.Match(line, @"^device list:\s*\d+\s*known;\s*active slot\s*(\d+)\s*$", RegexOptions.IgnoreCase);
+            if (!active.Success) return;
+
+            int activeSlot;
+            if (!int.TryParse(active.Groups[1].Value, out activeSlot)) return;
+            string activeName;
+            activeDeviceText = activeSlot > 0 && deviceSlotNames.TryGetValue(activeSlot, out activeName) ? activeName : null;
+            // Slots are only as good as the list they came with; a device can
+            // move between them, so do not carry them into the next one.
+            deviceSlotNames.Clear();
+            ShowCodecRow();
+        }
+
+        // The codec follows whichever device is playing, so the two belong on one
+        // line: "AAC from dave-p10p" says what the codec alone cannot. The device
+        // is left off when the headset does not name one, rather than shown as
+        // unknown, because the codec on its own is still the truth.
+        private void ShowCodecRow()
+        {
+            if (codecLabel == null) return;
+            if (codecText == null)
+            {
+                // Nothing reported yet, and nothing will be until the bud comes
+                // out, which "Waiting" would not say.
+                if (codecStale) codecLabel.Text = "Not reported while a bud is docked";
+                return;
+            }
+            codecLabel.Text = activeDeviceText == null ? codecText : codecText + " from " + activeDeviceText;
             // Dimmed, as the meter is, for a value no longer being refreshed:
-            // the source can still change while the bud is docked. With nothing
-            // reported yet, say why rather than go on "Waiting".
-            if (codecReported) codecLabel.ForeColor = faint;
-            else codecLabel.Text = "Not reported while a bud is docked";
+            // the source can still change while the bud is docked.
+            codecLabel.ForeColor = codecStale ? faint : subdued;
         }
 
         // Takes either a whole state batch or a single line from the meter
