@@ -18,6 +18,25 @@ namespace Xm5ControlUi
         [STAThread]
         private static void Main()
         {
+            // One instance only. Two would fight over the headset's control
+            // channel - it allows a single session - and would both claim the
+            // same global shortcuts, with the second one silently getting none.
+            bool firstInstance;
+            using (var instanceLock = new Mutex(true, MainForm.SingleInstanceMutexName, out firstInstance))
+            {
+                if (!firstInstance)
+                {
+                    Log("Already running");
+                    MainForm.AskRunningInstanceToShow();
+                    return;
+                }
+                Run();
+                GC.KeepAlive(instanceLock);
+            }
+        }
+
+        private static void Run()
+        {
             try
             {
                 Log("Starting");
@@ -372,6 +391,30 @@ namespace Xm5ControlUi
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+        // A second launch asks the running instance to show itself and then
+        // exits; see Program.Main. The message id is derived from the name, so
+        // both processes arrive at the same number without sharing anything.
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int RegisterWindowMessage(string lpString);
+
+        // SendNotifyMessage, not PostMessage: a posted broadcast reports success
+        // and is never delivered to the hidden window this has to reach. This one
+        // still does not wait for another process to handle it.
+        [DllImport("user32.dll")]
+        private static extern bool SendNotifyMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        internal const string SingleInstanceMutexName = @"Local\XmControl.SingleInstance";
+        internal const string ShowWindowMessageName = "XmControl.ShowWindow";
+        private static readonly IntPtr HwndBroadcast = new IntPtr(0xffff);
+
+        internal static void AskRunningInstanceToShow()
+        {
+            int message = RegisterWindowMessage(ShowWindowMessageName);
+            if (message != 0) SendNotifyMessage(HwndBroadcast, message, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        private readonly int showWindowMessage = RegisterWindowMessage(ShowWindowMessageName);
+
         private const int WmHotKey = 0x0312;
         private const int WmClose = 0x0010;
         private const int ShortcutHotkeyBaseId = 0x5300;
@@ -482,6 +525,16 @@ namespace Xm5ControlUi
                     return;
                 }
                 QueueImmediateExit();
+                return;
+            }
+
+            // Someone started the app again. Treat it as "show me the window",
+            // which is what a second launch is nearly always for: the window can
+            // be hidden in the tray, and the tray icon itself can be buried in
+            // the overflow, so the app looks like it never started.
+            if (m.Msg != 0 && m.Msg == showWindowMessage)
+            {
+                ShowWindow();
                 return;
             }
 
