@@ -168,8 +168,9 @@ than with the connection. While nothing is refreshing it — the meter off or
 paused, or the desktop locked — the last reading stays and says how old it is
 once it is more than five minutes out of date.
 
-The tray digits turn yellow when the lower earbud drops below 20% and red below
-10%. Only a recent reading colours them, and dimming for a stalled reading takes
+The tray digits turn yellow when the lower earbud drops below 30% and red below
+20%, the level at which the WF-1000XM6's Auto Power Save starts turning
+features off. Only a recent reading colours them, and dimming for a stalled reading takes
 precedence, so grey still means only that the number has stopped updating.
 
 The icon has four appearances and they are meant to be told apart: bright
