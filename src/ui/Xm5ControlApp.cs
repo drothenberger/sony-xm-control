@@ -311,6 +311,13 @@ namespace Xm5ControlUi
         // Comfortably longer than the stream's own interval, so it only shows
         // when nothing is refreshing battery at all.
         private const int BatteryAgeShownAfterMinutes = 5;
+        // Below these the tray digits turn yellow, then red. Judged on the lower
+        // earbud, not the case: a flat case does not cut listening short.
+        // Yellow rather than amber because amber and red differ mostly in hue,
+        // which red/green colour blindness hides; yellow is far brighter than
+        // red, and a difference in lightness survives.
+        private const int BatteryLowPercent = 20;
+        private const int BatteryCriticalPercent = 10;
         private const int MeterSupervisorIntervalMs = 1000;
         // How long a reading may be overdue before the display says so. It has
         // to clear the longest gap that ordinary operation produces, which is a
@@ -425,6 +432,10 @@ namespace Xm5ControlUi
         private string batteryLevelsText;
         private string batteryCaseText;
         private DateTime batteryReadAt;
+        // The lowest level that limits listening - the lower bud, or the one
+        // level an over-ear model reports - or null before any reading.
+        private int? batteryListeningLevel;
+        private Color trayIconColorDrawn;
         private bool autoDetectRunning;
         // Whether the last scan found the headset connected. Distinct from
         // lastStateRefreshConnected, which says whether the last state batch
@@ -2234,6 +2245,7 @@ namespace Xm5ControlUi
             {
                 batteryLevelsText = null;
                 batteryCaseText = null;
+                batteryListeningLevel = null;
             }
             if (IsClosing) return changed;
 
@@ -2439,9 +2451,11 @@ namespace Xm5ControlUi
         {
             if (IsClosing) return;
 
-            // The battery age in the tooltip moves with the clock rather than
-            // with any reading, so something has to look at it. Nothing reaches
-            // the shell unless the text actually changed.
+            // The battery age in the tooltip, and whether a low battery may
+            // still colour the digits, move with the clock rather than with any
+            // reading, so something has to look at them. Neither reaches the
+            // shell unless the result actually changed.
+            ApplyTrayIcon();
             ApplyTrayTooltip();
 
             // Support is a protocol capability, not a form factor, so it is
@@ -2707,8 +2721,9 @@ namespace Xm5ControlUi
             bool paused = TrayMeterPausedNow;
             string text = trayMeterEnabled ? trayMeterDigits : null;
             bool dim = trayMeterDigitsDim;
+            Color digits = TrayDigitsColor(dim);
             if (trayIconApplied && paused == trayIconPausedDrawn && text == trayIconTextDrawn &&
-                (text == null || dim == trayIconDimDrawn)) return;
+                (text == null || (dim == trayIconDimDrawn && digits == trayIconColorDrawn))) return;
 
             if (text == null && !paused)
             {
@@ -2725,7 +2740,7 @@ namespace Xm5ControlUi
                     // bright is a second thing separating it from stale digits.
                     rendered = paused
                         ? RenderPausedIcon(Color.FromArgb(226, 230, 235))
-                        : RenderDigitsIcon(text, dim ? Color.FromArgb(128, 134, 142) : Color.FromArgb(226, 230, 235));
+                        : RenderDigitsIcon(text, digits);
                 }
                 catch
                 {
@@ -2742,8 +2757,26 @@ namespace Xm5ControlUi
 
             trayIconTextDrawn = text;
             trayIconDimDrawn = dim;
+            trayIconColorDrawn = digits;
             trayIconPausedDrawn = paused;
             trayIconApplied = true;
+        }
+
+        // Dimmed keeps its one meaning, that the sound level has stopped
+        // updating, and wins over everything else. Otherwise the digits warn of
+        // a low battery, but only on a reading recent enough to trust: a colour
+        // carries no age the way the tooltip does, so an old level going yellow
+        // would claim something nobody currently knows.
+        private Color TrayDigitsColor(bool dim)
+        {
+            if (dim) return Color.FromArgb(128, 134, 142);
+            if (batteryListeningLevel.HasValue &&
+                DateTime.UtcNow - batteryReadAt < TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes))
+            {
+                if (batteryListeningLevel.Value < BatteryCriticalPercent) return Color.FromArgb(255, 99, 88);
+                if (batteryListeningLevel.Value < BatteryLowPercent) return Color.FromArgb(255, 222, 0);
+            }
+            return Color.FromArgb(226, 230, 235);
         }
 
         // Pausing only takes effect once the window is out of the way, so this
@@ -2834,6 +2867,7 @@ namespace Xm5ControlUi
             if (buds.Success)
             {
                 batteryLevelsText = "L " + buds.Groups[1].Value + "%   R " + buds.Groups[2].Value + "%";
+                batteryListeningLevel = Math.Min(int.Parse(buds.Groups[1].Value), int.Parse(buds.Groups[2].Value));
             }
             else if (single.Success && !(currentProfile != null && currentProfile.HasEarbudBatteries))
             {
@@ -2841,6 +2875,7 @@ namespace Xm5ControlUi
                 // coarser answer to the same question and does not replace them.
                 batteryLevelsText = FormatBatteryText(single.Groups[1].Value);
                 batteryCaseText = null;
+                batteryListeningLevel = int.Parse(Regex.Match(single.Groups[1].Value, @"\d+").Value);
             }
             else if (!cradle.Success)
             {
@@ -2853,6 +2888,7 @@ namespace Xm5ControlUi
             {
                 batteryLabel.Text = BatteryText("   ");
             }
+            ApplyTrayIcon();
             ApplyTrayTooltip();
         }
 
