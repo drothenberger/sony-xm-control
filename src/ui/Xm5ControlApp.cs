@@ -301,6 +301,7 @@ namespace Xm5ControlUi
         private bool trayNotifications = true;
         private bool trayCleanupStarted;
         private bool commandBusy;
+        private bool controlInUse;
         private bool autoDetectRunning;
         private bool lastStateRefreshConnected;
         private bool immediateExitQueued;
@@ -1795,7 +1796,8 @@ namespace Xm5ControlUi
             bool changed = ApplyProfile(detection.Profile);
             if (connectionLabel != null) connectionLabel.Text = detection.Connected ? "Connected" : "Not connected";
             if (lastActionLabel != null && changed) lastActionLabel.Text = "Detected " + detection.Profile.DisplayName;
-            SetStatus(detection.Connected ? "Connected" : "Not connected", detection.Connected ? green : amber);
+            if (detection.Connected && controlInUse) SetStatus("Connected - controls in use by another app", amber);
+            else SetStatus(detection.Connected ? "Connected" : "Not connected", detection.Connected ? green : amber);
             return detection;
         }
 
@@ -2018,7 +2020,7 @@ namespace Xm5ControlUi
             if (IsClosing) return;
             if (output.Contains("Could not open"))
             {
-                SetStatus("Device not reachable", red);
+                SetStatus(UnreachableStatus(output), red);
                 lastActionLabel.Text = "Equalizer preset not sent";
                 return;
             }
@@ -2061,7 +2063,7 @@ namespace Xm5ControlUi
             if (IsClosing) return;
             if (output.Contains("Could not open"))
             {
-                SetStatus("Device not reachable", red);
+                SetStatus(UnreachableStatus(output), red);
                 lastActionLabel.Text = presetName + " not saved";
                 return;
             }
@@ -2167,7 +2169,7 @@ namespace Xm5ControlUi
                 }
                 if (output.Contains("Could not open"))
                 {
-                    SetStatus("Device not reachable", red);
+                    SetStatus(UnreachableStatus(output), red);
                     lastActionLabel.Text = "Equalizer not sent";
                     return;
                 }
@@ -2510,7 +2512,7 @@ namespace Xm5ControlUi
                 var output = await RunBackendProcessPacedAsync(args);
                 if (IsClosing) return output;
 
-                if (output.Contains("Could not open")) SetStatus("Device not reachable", red);
+                if (output.Contains("Could not open")) SetStatus(UnreachableStatus(output), red);
                 else SetStatus("Ready", subdued);
                 return output;
             }
@@ -2521,7 +2523,9 @@ namespace Xm5ControlUi
             }
             finally
             {
-                if (!IsClosing) SetBusy(false, "Ready");
+                // The try and catch have already set the outcome; a blanket
+                // "Ready" here used to wipe "Device not reachable" at once.
+                commandBusy = false;
                 commandGate.Release();
             }
         }
@@ -2601,12 +2605,35 @@ namespace Xm5ControlUi
             if (shouldPace) await WaitForBackendPaceAsync();
             try
             {
-                return await Task.Run(() => RunBackendProcess(args));
+                string output = await Task.Run(() => RunBackendProcess(args));
+                // A scan never touches the control channel, so it cannot say
+                // whether another app still holds it.
+                if (!IsScanCommand(args)) controlInUse = IsControlInUse(output);
+                return output;
             }
             finally
             {
                 if (shouldPace) lastBackendCommandAtUtc = DateTime.UtcNow;
             }
+        }
+
+        private static bool IsScanCommand(string args)
+        {
+            return args != null && (args == "scan" || args.StartsWith("scan ", StringComparison.Ordinal));
+        }
+
+        // The backend's wording when the connect is refused as already in use:
+        // the headset is there, but Sound Connect or another utility has its
+        // control session. Windows still reports it connected, which is why
+        // "Device not reachable" sent people looking in the wrong place.
+        private static bool IsControlInUse(string output)
+        {
+            return output != null && output.Contains("in use by another app");
+        }
+
+        private static string UnreachableStatus(string output)
+        {
+            return IsControlInUse(output) ? "Headset in use by another app" : "Device not reachable";
         }
 
         private async Task WaitForBackendPaceAsync()
