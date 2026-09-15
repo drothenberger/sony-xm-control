@@ -302,6 +302,15 @@ namespace Xm5ControlUi
         // Long enough that the stream is limited by the supervisor rather than
         // by running out of samples: a day at the interval above.
         private const int MeterStreamSamples = 108000;
+        // The stream also asks for battery, on its first reading and then this
+        // many readings apart - about once a minute at the rate it actually
+        // runs. Battery moves slowly, and each ask is a few tens of
+        // milliseconds on a channel the stream already holds.
+        private const int MeterStreamBatteryEvery = 60;
+        // A battery reading older than this carries its age in the tooltip.
+        // Comfortably longer than the stream's own interval, so it only shows
+        // when nothing is refreshing battery at all.
+        private const int BatteryAgeShownAfterMinutes = 5;
         private const int MeterSupervisorIntervalMs = 1000;
         // How long a reading may be overdue before the display says so. It has
         // to clear the longest gap that ordinary operation produces, which is a
@@ -338,6 +347,14 @@ namespace Xm5ControlUi
                 : ncasmTypeSeen == 0x17 ? "66 17;"
                 : "66 19;66 17;";
             return "batch \"" + battery + "12 00;" + ncasm + StateBatchTail;
+        }
+
+        // The battery queries worth asking on the meter stream. Earbuds skip the
+        // single level from 22 00, which the per-bud reading already supersedes,
+        // so the stream holds the channel no longer than it has to.
+        private static string MeterBatteryQueries(DeviceProfile profile)
+        {
+            return profile != null && profile.HasEarbudBatteries ? "22 01;22 02" : "22 00";
         }
 
         private readonly string backendPath;
@@ -402,6 +419,12 @@ namespace Xm5ControlUi
         private bool trayIconPausedDrawn;
         private bool trayIconApplied;
         private string trayTooltipApplied;
+        // The last battery levels, kept in two parts because the meter stream
+        // reports the buds and the case on separate lines, and with the time
+        // they were read so the tray can say when they have gone old.
+        private string batteryLevelsText;
+        private string batteryCaseText;
+        private DateTime batteryReadAt;
         private bool autoDetectRunning;
         // Whether the last scan found the headset connected. Distinct from
         // lastStateRefreshConnected, which says whether the last state batch
@@ -1686,8 +1709,34 @@ namespace Xm5ControlUi
                 // thing here that could be read as current when it is not.
                 if (trayMeterDigitsDim) title += " (not updating)";
             }
-            // 63 characters is the Shell_NotifyIcon limit for a tooltip.
+
+            // Battery is the thing people otherwise open the window to check.
+            // It is refreshed by the state batch while the window is open and
+            // by the meter stream while the tray meter runs; with neither, the
+            // last reading stays, and says how old it is rather than passing
+            // for current.
+            string battery = BatteryText(" ");
+            if (battery != null)
+            {
+                TimeSpan age = DateTime.UtcNow - batteryReadAt;
+                string suffix = age >= TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes)
+                    ? " (" + FormatAge(age) + " ago)"
+                    : "";
+                // 63 characters is the Shell_NotifyIcon limit for a tooltip.
+                // When the full line does not fit, the case level goes before
+                // the age does: an old reading without its age would pass for
+                // a current one.
+                string line = title + "\n" + battery + suffix;
+                if (line.Length > 63) line = title + "\n" + batteryLevelsText.Replace("   ", " ") + suffix;
+                if (line.Length <= 63) title = line;
+            }
             return title.Length <= 63 ? title : title.Substring(0, 63);
+        }
+
+        private static string FormatAge(TimeSpan age)
+        {
+            if (age.TotalHours >= 1) return (int)age.TotalHours + " h";
+            return (int)age.TotalMinutes + " min";
         }
 
         private string WithDevice(string args)
@@ -2180,6 +2229,12 @@ namespace Xm5ControlUi
             // Which NCASM inquired type answers is a property of the device, so a
             // different one has to prove it again.
             if (changed) ncasmTypeSeen = 0;
+            // Another headset's battery is not this one's.
+            if (changed)
+            {
+                batteryLevelsText = null;
+                batteryCaseText = null;
+            }
             if (IsClosing) return changed;
 
             Text = AppTitle();
@@ -2384,6 +2439,11 @@ namespace Xm5ControlUi
         {
             if (IsClosing) return;
 
+            // The battery age in the tooltip moves with the clock rather than
+            // with any reading, so something has to look at it. Nothing reaches
+            // the shell unless the text actually changed.
+            ApplyTrayTooltip();
+
             // Support is a protocol capability, not a form factor, so it is
             // probed rather than inferred from the model name.
             if (!ReferenceEquals(soundPressureProbedProfile, currentProfile))
@@ -2485,7 +2545,9 @@ namespace Xm5ControlUi
                     FileName = backendPath,
                     Arguments = WithDevice("soundpressure --samples " + MeterStreamSamples +
                                            " --interval " + MeterStreamIntervalMs +
-                                           " --timeout " + MeterStreamTimeoutMs),
+                                           " --timeout " + MeterStreamTimeoutMs +
+                                           " --battery \"" + MeterBatteryQueries(currentProfile) + "\"" +
+                                           " --battery-every " + MeterStreamBatteryEvery),
                     WorkingDirectory = Path.GetDirectoryName(backendPath),
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
@@ -2573,6 +2635,13 @@ namespace Xm5ControlUi
         private void OnMeterLine(string line)
         {
             if (IsClosing || string.IsNullOrEmpty(line)) return;
+
+            // Battery rides along on the same stream; see MeterStreamBatteryEvery.
+            if (Regex.IsMatch(line, @"^(case )?battery:", RegexOptions.IgnoreCase))
+            {
+                ParseBattery(line);
+                return;
+            }
 
             var match = Regex.Match(line, @"^sound pressure:\s*(.+?)\s*$", RegexOptions.IgnoreCase);
             if (!match.Success) return;
@@ -2747,26 +2816,51 @@ namespace Xm5ControlUi
             codecLabel.Text = value.Equals("unknown", StringComparison.OrdinalIgnoreCase) ? "Unknown" : value;
         }
 
+        // Takes either a whole state batch or a single line from the meter
+        // stream, which reports the buds and the case separately. Each part
+        // keeps its last value until a new one arrives, so a line carrying only
+        // one of them does not blank the other.
         private void ParseBattery(string output)
         {
-            if (batteryLabel == null) return;
-
             // Earbuds report the two buds under inquired type 0x01 and the case
             // under 0x02. Over-ear models answer neither, so fall back to the
             // single level from type 0x00.
             var buds = Regex.Match(output, @"(?m)^battery:\s*left\s*(\d+)%.*?right\s*(\d+)%", RegexOptions.IgnoreCase);
             var cradle = Regex.Match(output, @"(?m)^case battery:\s*(\d+)%", RegexOptions.IgnoreCase);
+            // Only a level, never a hex dump of a battery frame this build does
+            // not decode, or that dump would become the label.
+            var single = Regex.Match(output, @"(?m)^battery:\s*(\d+%.*)$");
 
             if (buds.Success)
             {
-                string text = "L " + buds.Groups[1].Value + "%   R " + buds.Groups[2].Value + "%";
-                if (cradle.Success) text += "   Case " + cradle.Groups[1].Value + "%";
-                batteryLabel.Text = text;
+                batteryLevelsText = "L " + buds.Groups[1].Value + "%   R " + buds.Groups[2].Value + "%";
+            }
+            else if (single.Success && !(currentProfile != null && currentProfile.HasEarbudBatteries))
+            {
+                // Once a model reports its buds separately, a single level is a
+                // coarser answer to the same question and does not replace them.
+                batteryLevelsText = FormatBatteryText(single.Groups[1].Value);
+                batteryCaseText = null;
+            }
+            else if (!cradle.Success)
+            {
                 return;
             }
+            if (cradle.Success) batteryCaseText = "Case " + cradle.Groups[1].Value + "%";
 
-            var single = Regex.Match(output, @"(?m)^battery:\s*(.+)$");
-            if (single.Success) batteryLabel.Text = FormatBatteryText(single.Groups[1].Value);
+            batteryReadAt = DateTime.UtcNow;
+            if (batteryLabel != null && batteryLevelsText != null)
+            {
+                batteryLabel.Text = BatteryText("   ");
+            }
+            ApplyTrayTooltip();
+        }
+
+        private string BatteryText(string gap)
+        {
+            if (batteryLevelsText == null) return null;
+            string text = batteryLevelsText.Replace("   ", gap);
+            return batteryCaseText == null ? text : text + gap + batteryCaseText;
         }
 
         private static string FormatBatteryText(string text)
