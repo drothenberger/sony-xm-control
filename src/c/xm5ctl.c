@@ -808,6 +808,24 @@ static int send_payload(SOCKET s, const uint8_t *payload, size_t payload_len, ui
     return send_payload_seq(s, payload, payload_len, data_type, 0, timeout_ms, no_ack, expected_command, responses, max_responses);
 }
 
+/* WSAEADDRINUSE from the connect means the headset's control session is already
+   taken - by Sound Connect on a phone, or by another program on this PC - which
+   needs a different fix from a headset that is not there at all. */
+static bool connect_in_use;
+
+static void note_connect_error(int err) {
+    if (err == WSAEADDRINUSE) connect_in_use = true;
+}
+
+static void report_open_failure(void) {
+    if (connect_in_use) {
+        fprintf(stderr, "Could not open Sony MDR RFCOMM socket: the headset control connection is in use by another app. "
+                        "Close Sound Connect or any other headset utility (such as Bluetooth Battery Monitor) and try again.\n");
+    } else {
+        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+    }
+}
+
 static SOCKET connect_addr(BLUETOOTH_ADDRESS addr, const GUID *service_uuid, int timeout_ms) {
     SOCKET s = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
     SOCKADDR_BTH sa;
@@ -854,14 +872,22 @@ static SOCKET connect_addr(BLUETOOTH_ADDRESS addr, const GUID *service_uuid, int
                 int so_error = 0;
                 int so_error_len = sizeof(so_error);
                 if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&so_error, &so_error_len) == SOCKET_ERROR || so_error != 0) {
+                    note_connect_error(so_error);
                     closesocket(s);
                     return INVALID_SOCKET;
                 }
             } else {
+                /* A refused connect lands here, flagged in exceptfds. */
+                int so_error = 0;
+                int so_error_len = sizeof(so_error);
+                if (rc > 0 && getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&so_error, &so_error_len) != SOCKET_ERROR) {
+                    note_connect_error(so_error);
+                }
                 closesocket(s);
                 return INVALID_SOCKET;
             }
         } else {
+            note_connect_error(err);
             closesocket(s);
             return INVALID_SOCKET;
         }
@@ -878,6 +904,7 @@ static SOCKET connect_best(const char *name_filter, int timeout_ms, wchar_t *sel
     bt_device_t devices[MAX_DEVICES];
     int count = enumerate_devices(devices, MAX_DEVICES);
 
+    connect_in_use = false;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < count; i++) {
             SOCKET s;
@@ -1071,7 +1098,7 @@ static int invoke_payload(const options_t *opt, const uint8_t *payload, size_t p
 
     s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
-        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        report_open_failure();
         return 1;
     }
 
@@ -1127,7 +1154,7 @@ static int invoke_batch(const options_t *opt) {
 
     s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
-        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        report_open_failure();
         return 1;
     }
 
@@ -1234,7 +1261,7 @@ static int invoke_ncasm_get(const options_t *opt) {
 
     s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
-        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        report_open_failure();
         return 1;
     }
     wprintf(L"Connecting to %ls, protocol v2...\n", selected[0] ? selected : L"<unnamed>");
@@ -1267,7 +1294,7 @@ static int invoke_ncasm_set(const options_t *opt) {
 
     s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
-        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        report_open_failure();
         return 1;
     }
     wprintf(L"Connecting to %ls, protocol v2...\n", selected[0] ? selected : L"<unnamed>");
@@ -1382,7 +1409,7 @@ static int invoke_sound_pressure(const options_t *opt) {
 
     s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
-        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        report_open_failure();
         return 1;
     }
 
@@ -1460,7 +1487,7 @@ static int invoke_listen(const options_t *opt) {
 
     s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
-        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        report_open_failure();
         return 1;
     }
 
@@ -1494,7 +1521,7 @@ static int invoke_sequence(const options_t *opt, const uint8_t *first, size_t fi
 
     s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
     if (s == INVALID_SOCKET) {
-        fprintf(stderr, "Could not open Sony MDR RFCOMM socket. Is the headset connected in Windows Bluetooth/audio settings?\n");
+        report_open_failure();
         return 1;
     }
 
