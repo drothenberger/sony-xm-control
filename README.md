@@ -22,7 +22,7 @@ Unofficial Windows controller for Sony 1000X headphones and earbuds.
 - Clear Bass control (6-band models)
 - DSEE Extreme Auto/Off
 - Bluetooth connection quality mode
-- Active codec display
+- Active codec display, with the device it is playing from
 - Live sound pressure reading
 - Multipoint toggle
 - Speak-to-Chat toggle
@@ -91,6 +91,17 @@ which reports it as a letter: `S` is SBC, `A` is AAC and `L` is LDAC. It follows
 whichever connection last played audio rather than a fixed link, so on a
 multipoint setup it changes as audio moves between devices, and it keeps the
 last value once playback stops.
+
+The codec row names the device that codec belongs to — "AAC from dave-p10p" —
+because on a multipoint headset the codec alone does not say much. `36 02` on
+`DATA_MDR_NO2` returns `37 02 <count>` and then one record per paired device: a
+17-character address, a connection slot, a three-byte class of device (`FF FF
+FF` when that device is not connected), and a length-prefixed name. The byte
+after the last record is the slot of the device currently playing, and slot 0
+means not connected. The headset also pushes the same list as `39 02` whenever
+it changes. Each side is sent the list with itself first, so a device's
+position in it means nothing. The local machine is named as such by comparing
+each address against the PC's own Bluetooth adapter.
 
 The equalizer band layout is read from the device rather than assumed. `5A 00`
 returns `5B 00 <count>` followed by one `01 <freq16>` group per band: six bands
