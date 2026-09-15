@@ -579,6 +579,107 @@ static void print_sound_pressure(const uint8_t *p, size_t n) {
     printf("sound pressure: %u dB\n", p[2]);
 }
 
+/* The local adapter's address, so the paired-device list can say which entry is
+   this PC. Zero when it cannot be read; every comparison then simply fails. */
+static uint64_t local_radio_address(void) {
+    static uint64_t cached = 0;
+    static bool tried = false;
+    BLUETOOTH_FIND_RADIO_PARAMS params;
+    HANDLE radio = NULL;
+    HBLUETOOTH_RADIO_FIND find;
+
+    if (tried) return cached;
+    tried = true;
+
+    ZeroMemory(&params, sizeof(params));
+    params.dwSize = sizeof(params);
+    find = BluetoothFindFirstRadio(&params, &radio);
+    if (find) {
+        BLUETOOTH_RADIO_INFO info;
+        ZeroMemory(&info, sizeof(info));
+        info.dwSize = sizeof(info);
+        if (BluetoothGetRadioInfo(radio, &info) == ERROR_SUCCESS) {
+            cached = info.address.ullLong;
+        }
+        CloseHandle(radio);
+        BluetoothFindRadioClose(find);
+    }
+    return cached;
+}
+
+static bool parse_addr_text(const char *text, uint64_t *out) {
+    uint64_t value = 0;
+    for (int i = 0; i < 17; i++) {
+        char c = text[i];
+        if (i % 3 == 2) {
+            if (c != ':') return false;
+            continue;
+        }
+        int v;
+        if (c >= '0' && c <= '9') v = c - '0';
+        else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+        else return false;
+        value = (value << 4) | (uint64_t)v;
+    }
+    *out = value;
+    return true;
+}
+
+/*
+ * The paired-device list, 37 02 in reply to 36 02 and pushed unsolicited as
+ * 39 02 whenever the list or the active device changes. Each record is a
+ * 17-character ASCII address, a connection slot, a three-byte class of device
+ * (FF FF FF when the device is not connected), then a length-prefixed name.
+ * The byte after the last record is the slot of the device currently playing.
+ * Each side receives the list with itself first, so position means nothing.
+ */
+static void print_device_list(const uint8_t *p, size_t n) {
+    size_t i = 3;
+    uint8_t count;
+    uint64_t local = local_radio_address();
+
+    if (n < 4) {
+        puts("device list: malformed response");
+        return;
+    }
+    count = p[2];
+    for (uint8_t entry = 0; entry < count; entry++) {
+        char addr[18];
+        uint8_t slot;
+        bool connected;
+        uint8_t name_len;
+        uint64_t addr_value = 0;
+
+        if (i + 22 > n) {
+            puts("device list: truncated response");
+            return;
+        }
+        memcpy(addr, p + i, 17);
+        addr[17] = '\0';
+        i += 17;
+        slot = p[i];
+        connected = !(p[i + 1] == 0xff && p[i + 2] == 0xff && p[i + 3] == 0xff);
+        i += 4;
+        name_len = p[i++];
+        if (i + name_len > n) {
+            puts("device list: truncated response");
+            return;
+        }
+        printf("device: slot %u; addr %s; %s", slot, addr, connected ? "connected" : "not connected");
+        if (local != 0 && parse_addr_text(addr, &addr_value) && addr_value == local) {
+            printf("; this pc");
+        }
+        printf("; name %.*s\n", (int)name_len, (const char *)(p + i));
+        i += name_len;
+    }
+    if (i < n) {
+        printf("device list: %u known; active slot %u\n", count, p[i]);
+    } else {
+        printf("device list: %u known; active slot unknown\n", count);
+    }
+}
+
 static void print_known_payload(const mdr_frame_t *frame) {
     const uint8_t *p = frame->payload;
     size_t n = frame->payload_len;
@@ -609,6 +710,12 @@ static void print_known_payload(const mdr_frame_t *frame) {
     }
     if (p[0] == 0x53 && n >= 4 && p[1] == 0x03 && frame->data_type == 0x0e) {
         print_safe_listening(p);
+        return;
+    }
+
+    /* 37 02 is the answer to 36 02; 39 02 is the same list pushed unasked. */
+    if ((p[0] == 0x37 || p[0] == 0x39) && n >= 2 && p[1] == 0x02) {
+        print_device_list(p, n);
         return;
     }
 
@@ -1166,6 +1273,15 @@ static int invoke_batch(const options_t *opt) {
         mdr_frame_t responses[8];
         int expected;
         int count;
+        /* "mdr2:36 02" sends that entry on DATA_MDR_NO2; the rest go on
+           DATA_MDR, which is where all the older reads live. */
+        uint8_t data_type = 0x0c;
+
+        while (*part == ' ') part++;
+        if (strncmp(part, "mdr2:", 5) == 0) {
+            data_type = 0x0e;
+            part += 5;
+        }
 
         if (!parse_hex(part, payload, sizeof(payload), &payload_len) || payload_len == 0) {
             fprintf(stderr, "invalid batch payload: %s\n", part);
@@ -1173,12 +1289,12 @@ static int invoke_batch(const options_t *opt) {
             break;
         }
 
-        printf("TX[%d] DATA_MDR payload: ", index + 1);
+        printf("TX[%d] %s payload: ", index + 1, data_type_name(data_type));
         print_hex(payload, payload_len);
         putchar('\n');
 
         expected = expected_for_payload(payload, payload_len);
-        count = send_payload_seq(s, payload, payload_len, 0x0c, (uint8_t)(index & 1), opt->timeout_ms,
+        count = send_payload_seq(s, payload, payload_len, data_type, (uint8_t)(index & 1), opt->timeout_ms,
                                  opt->no_ack, expected, responses, (int)ARRAY_LEN(responses));
         if (count < 0) {
             rc = 1;
