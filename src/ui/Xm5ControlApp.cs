@@ -589,6 +589,7 @@ namespace Xm5ControlUi
         private bool liveEqSendPending;
         private DateTime lastEqEditAt = DateTime.MinValue;
         private int eqFetchGeneration;
+        private int settingWriteCount;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr hIcon);
@@ -2501,23 +2502,27 @@ namespace Xm5ControlUi
             var detection = (await DetectProfileAsync(false)).Detection;
             if (IsClosing) return;
             if (detection == null) return;
+            int writesBefore = settingWriteCount;
             var output = await RunBackendAsync(WithDevice(BuildStateBatchCommand(detection.Profile ?? currentProfile)), "Updating");
             if (IsClosing) return;
             if (string.IsNullOrWhiteSpace(output)) return;
+            bool overtaken = settingWriteCount != writesBefore;
             if (!output.Contains("Could not open"))
             {
                 connectionLabel.Text = "Connected";
-                MarkStateRefreshed(detection);
+                if (!overtaken) MarkStateRefreshed(detection);
             }
             ParseBattery(output);
             ParseCodec(output);
             ParseActiveDevice(output);
+            if (overtaken) return;
             ParseMode(output);
             ParseExtraSettings(output);
         }
 
         private async Task RefreshCurrentStateQuietAsync(DeviceDetection detection)
         {
+            int writesBefore = settingWriteCount;
             var output = await RunBackendQuietAsync(WithDevice(BuildStateBatchCommand(
                 detection != null && detection.Profile != null ? detection.Profile : currentProfile)));
             if (IsClosing) return;
@@ -2532,6 +2537,9 @@ namespace Xm5ControlUi
             ParseBattery(output);
             ParseCodec(output);
             ParseActiveDevice(output);
+            // Left unmarked, so the next detect tick reads the settings again
+            // once the write has gone out.
+            if (settingWriteCount != writesBefore) return;
             ParseMode(output);
             ParseExtraSettings(output);
             MarkStateRefreshed(detection);
@@ -3313,7 +3321,7 @@ namespace Xm5ControlUi
             bigDetailLabel.Text = "Noise cancelling active";
             SetModeButtonState("ANC");
             lastActionLabel.Text = "ANC selected";
-            ParseMode(await RunBackendAsync(WithDevice("ncasm-set --mode anc"), "Setting ANC"));
+            ParseMode(await RunSettingWriteAsync(WithDevice("ncasm-set --mode anc"), "Setting ANC"));
         }
 
         private async Task SetAmbientAsync(int level, bool voice = false)
@@ -3332,7 +3340,7 @@ namespace Xm5ControlUi
             // differ because the headset clamps values it will not take. When it
             // reports nothing the command did not land, so say that instead of
             // presenting the requested value as a confirmation.
-            if (ParseMode(await RunBackendAsync(WithDevice(args), "Setting ambient")))
+            if (ParseMode(await RunSettingWriteAsync(WithDevice(args), "Setting ambient")))
             {
                 lastActionLabel.Text = (IsVoiceAmbientSelected() ? "Voice ambient " : "Ambient ") + levelSlider.Value;
             }
@@ -3357,7 +3365,7 @@ namespace Xm5ControlUi
             // "Ambient sound: Manual" promising something neither delivered.
             string args = "ncasm-set --mode ambient --auto " + (enabled ? "on" : "off");
             if (enabled) args += " --sensitivity " + SelectedSensitivity();
-            ParseMode(await RunBackendAsync(WithDevice(args), "Setting auto ambient"));
+            ParseMode(await RunSettingWriteAsync(WithDevice(args), "Setting auto ambient"));
         }
 
         private async Task SetAmbientSensitivityAsync(string sensitivity)
@@ -3369,7 +3377,7 @@ namespace Xm5ControlUi
             }
             lastActionLabel.Text = "Auto ambient sensitivity " + sensitivity;
             string args = "ncasm-set --auto on --sensitivity " + sensitivity + "";
-            ParseMode(await RunBackendAsync(WithDevice(args), "Setting sensitivity"));
+            ParseMode(await RunSettingWriteAsync(WithDevice(args), "Setting sensitivity"));
         }
 
         private async Task SetOffAsync()
@@ -3378,14 +3386,14 @@ namespace Xm5ControlUi
             bigDetailLabel.Text = "Noise control disabled";
             SetModeButtonState("Off");
             lastActionLabel.Text = "Noise control off";
-            ParseMode(await RunBackendAsync(WithDevice("ncasm-set --mode off"), "Turning off"));
+            ParseMode(await RunSettingWriteAsync(WithDevice("ncasm-set --mode off"), "Turning off"));
         }
 
         private async Task SetDseeAsync(bool enabled)
         {
             SetDseeState(enabled);
             lastActionLabel.Text = "DSEE Extreme " + (enabled ? "Auto" : "Off");
-            await RunBackendAsync(WithDevice("raw \"E8 01 " + (enabled ? "01" : "00") + "\" --ack-only"), "Setting DSEE");
+            await RunSettingWriteAsync(WithDevice("raw \"E8 01 " + (enabled ? "01" : "00") + "\" --ack-only"), "Setting DSEE");
         }
 
         private async Task SendEqualizerPresetAsync(int preset)
@@ -3561,7 +3569,7 @@ namespace Xm5ControlUi
                 return;
             }
 
-            await RunBackendAsync(WithDevice("raw \"" + payload + "\" --ack-only"), "Setting equalizer");
+            await RunSettingWriteAsync(WithDevice("raw \"" + payload + "\" --ack-only"), "Setting equalizer");
         }
 
         // The device stores whatever it is sent without range-checking it, so every
@@ -3636,7 +3644,7 @@ namespace Xm5ControlUi
             if (eqSliders != null) ResetEqSliders(target);
             lastActionLabel.Text = "Equalizer set to flat";
             string payload = FormatEqualizerPayload(target, FlatEqValues());
-            await RunBackendAsync(WithDevice("raw \"" + payload + "\" --ack-only"), "Setting equalizer");
+            await RunSettingWriteAsync(WithDevice("raw \"" + payload + "\" --ack-only"), "Setting equalizer");
         }
 
         private int[] FlatEqValues()
@@ -3976,7 +3984,7 @@ namespace Xm5ControlUi
             }
             SetConnectionQualityState(prioritizeSound);
             lastActionLabel.Text = prioritizeSound ? "Connection quality set to quality" : "Connection quality set to stability";
-            await RunBackendAsync(WithDevice("raw \"E8 00 " + (prioritizeSound ? "00" : "01") + "\" --ack-only"), "Setting connection quality");
+            await RunSettingWriteAsync(WithDevice("raw \"E8 00 " + (prioritizeSound ? "00" : "01") + "\" --ack-only"), "Setting connection quality");
         }
 
         private async Task SetSpeakToChatAsync(bool enabled)
@@ -3984,42 +3992,42 @@ namespace Xm5ControlUi
             string value = enabled ? "00" : "01";
             SetSpeakToChatState(enabled);
             lastActionLabel.Text = "Speak-to-Chat " + (enabled ? "on" : "off");
-            await RunBackendAsync(WithDevice("raw \"F8 02 " + value + " " + value + "\" --ack-only"), "Setting Speak-to-Chat");
+            await RunSettingWriteAsync(WithDevice("raw \"F8 02 " + value + " " + value + "\" --ack-only"), "Setting Speak-to-Chat");
         }
 
         private async Task SetWearPauseAsync(bool enabled)
         {
             SetWearPauseState(enabled);
             lastActionLabel.Text = "Pause when removed " + (enabled ? "on" : "off");
-            await RunBackendAsync(WithDevice("raw \"F8 01 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting wearing sensor");
+            await RunSettingWriteAsync(WithDevice("raw \"F8 01 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting wearing sensor");
         }
 
         private async Task SetTouchPanelAsync(bool enabled)
         {
             SetTouchPanelState(enabled);
             lastActionLabel.Text = "Touch panel " + (enabled ? "on" : "off");
-            await RunBackendAsync(WithDevice("raw \"D8 D1 00 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting touch panel");
+            await RunSettingWriteAsync(WithDevice("raw \"D8 D1 00 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting touch panel");
         }
 
         private async Task SetMultipointAsync(bool enabled)
         {
             SetMultipointState(enabled);
             lastActionLabel.Text = "Multipoint " + (enabled ? "on" : "off");
-            await RunBackendAsync(WithDevice("raw \"D8 D2 00 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting multipoint");
+            await RunSettingWriteAsync(WithDevice("raw \"D8 D2 00 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting multipoint");
         }
 
         private async Task SetAutoPowerRemovedAsync()
         {
             SetAutoPowerState("removed");
             lastActionLabel.Text = "Automatic power off set to on";
-            await RunBackendAsync(WithDevice("raw \"28 05 10 00\" --ack-only"), "Setting auto power");
+            await RunSettingWriteAsync(WithDevice("raw \"28 05 10 00\" --ack-only"), "Setting auto power");
         }
 
         private async Task SetAutoPowerDisabledAsync()
         {
             SetAutoPowerState("disabled");
             lastActionLabel.Text = "Automatic power off set to off";
-            await RunBackendAsync(WithDevice("raw \"28 05 11 00\" --ack-only"), "Setting auto power");
+            await RunSettingWriteAsync(WithDevice("raw \"28 05 11 00\" --ack-only"), "Setting auto power");
         }
 
         private bool ParseMode(string output)
@@ -4140,6 +4148,19 @@ namespace Xm5ControlUi
                 case 2: return "high";
                 default: return "standard";
             }
+        }
+
+        // A setting control shows its new value at once, but the write waits
+        // for the command gate, and a state refresh already holding the gate
+        // read the headset before the click. Applying that reading flips the
+        // control back to the old value, and the write only reaches the headset
+        // after that, so the display stays wrong until the next refresh. The
+        // count is taken synchronously on the click, before the gate is awaited,
+        // so a refresh can tell that a write was asked for while it ran.
+        private Task<string> RunSettingWriteAsync(string args, string busyText)
+        {
+            settingWriteCount++;
+            return RunBackendAsync(args, busyText);
         }
 
         private async Task<string> RunBackendAsync(string args, string busyText)
