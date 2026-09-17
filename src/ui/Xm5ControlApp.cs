@@ -2942,8 +2942,17 @@ namespace Xm5ControlUi
 
             if (buds.Success)
             {
-                batteryLevelsText = "L " + buds.Groups[1].Value + "%   R " + buds.Groups[2].Value + "%";
-                batteryListeningLevel = Math.Min(int.Parse(buds.Groups[1].Value), int.Parse(buds.Groups[2].Value));
+                // A bud in the case reads 0%, not-charging, on the WF-1000XM6,
+                // and goes straight back to its real level when taken out. It
+                // is not being listened on, so it does not count towards the
+                // warning, and it is shown as docked rather than as flat; a
+                // bud that really was flat would have switched itself off.
+                int left = int.Parse(buds.Groups[1].Value);
+                int right = int.Parse(buds.Groups[2].Value);
+                batteryLevelsText = "L " + BudLevelText(left) + "   R " + BudLevelText(right);
+                batteryListeningLevel = left == 0 ? (right == 0 ? (int?)null : right)
+                    : right == 0 ? left
+                    : Math.Min(left, right);
             }
             else if (single.Success && !(currentProfile != null && currentProfile.HasEarbudBatteries))
             {
@@ -2966,6 +2975,11 @@ namespace Xm5ControlUi
             }
             ApplyTrayIcon();
             ApplyTrayTooltip();
+        }
+
+        private static string BudLevelText(int level)
+        {
+            return level == 0 ? "in case" : level + "%";
         }
 
         private string BatteryText(string gap)
