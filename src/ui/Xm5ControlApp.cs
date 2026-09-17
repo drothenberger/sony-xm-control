@@ -462,6 +462,13 @@ namespace Xm5ControlUi
         // never asked for the reading.
         private bool trayMeterEnabled;
         private bool trayMeterPaused;
+        private readonly SoundLevelHistory soundLevelHistory = new SoundLevelHistory();
+        private SoundLevelHistoryForm soundLevelHistoryForm;
+        private CardPanel soundPressureBlock;
+        private Label soundPressureChevron;
+        private bool soundPressureBlockHover;
+        private ToolStripMenuItem soundLevelHistoryItem;
+        private int soundLevelReference = DefaultSoundLevelReference;
         private bool sessionLocked;
         // Held so it can be unhooked: SystemEvents keeps a static strong
         // reference, which would otherwise outlive the form and call back into
@@ -549,7 +556,11 @@ namespace Xm5ControlUi
         private const string SoundPressureHint =
             "Level of the audio playing through the headset, ignoring noise cancelling.\r\n" +
             "Shows \u2014 while nothing is playing, and for a few seconds after playback starts.\r\n" +
-            "Shows Off while Safe Listening is switched off in Sound Connect.";
+            "Shows Off while Safe Listening is switched off in Sound Connect.\r\n" +
+            "Click for the last hour.";
+        // Where the history graph draws its reference line until the user picks
+        // another: the level workplace hearing guidance starts from.
+        private const int DefaultSoundLevelReference = 85;
         private Label speakToChatLabel;
         private Label wearPauseLabel;
         private Label touchPanelLabel;
@@ -815,6 +826,18 @@ namespace Xm5ControlUi
             get { return Visible && WindowState != FormWindowState.Minimized; }
         }
 
+        // Either window showing a live reading keeps the meter running. The
+        // history window counts for the same reason the main one does: someone
+        // opened it to watch the level.
+        private bool MeterIsWatched
+        {
+            get
+            {
+                return WindowIsShowing ||
+                       (soundLevelHistoryForm != null && soundLevelHistoryForm.IsShowing);
+            }
+        }
+
         private bool CanUpdateUi
         {
             get { return !IsClosing && IsHandleCreated; }
@@ -912,17 +935,34 @@ namespace Xm5ControlUi
             // The live meter goes in the header rather than in a Settings row: it
             // is the one value on screen that moves second to second, and every
             // card below is already packed to the bottom of the window.
+            //
+            // The reading is also the way into the sound level history, so the
+            // caption, the number and a chevron share one block that lights up
+            // on hover. A separate button beside the gear was tried and did not
+            // sit well with it. Hiding the block on a headset without a meter
+            // takes the way in away with the reading.
+            soundPressureBlock = new CardPanel
+            {
+                BackColor = page,
+                BorderColor = page,
+                Radius = 8,
+                Size = new Size(158, 54),
+                Cursor = Cursors.Hand,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+            header.Controls.Add(soundPressureBlock);
+
             soundPressureCaption = new Label
             {
                 Text = "Sound pressure",
                 ForeColor = Color.FromArgb(190, 198, 207),
                 Font = new Font("Segoe UI Semibold", 9.2f),
                 AutoSize = false,
-                Size = new Size(220, 18),
-                TextAlign = ContentAlignment.MiddleRight,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
+                Size = new Size(126, 18),
+                Location = new Point(6, 3),
+                TextAlign = ContentAlignment.MiddleRight
             };
-            header.Controls.Add(soundPressureCaption);
+            soundPressureBlock.Controls.Add(soundPressureCaption);
 
             soundPressureLabel = new Label
             {
@@ -930,13 +970,34 @@ namespace Xm5ControlUi
                 ForeColor = ink,
                 Font = new Font("Segoe UI Semibold", 15f),
                 AutoSize = false,
-                Size = new Size(220, 30),
-                TextAlign = ContentAlignment.MiddleRight,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right
+                Size = new Size(126, 30),
+                Location = new Point(6, 21),
+                TextAlign = ContentAlignment.MiddleRight
             };
-            header.Controls.Add(soundPressureLabel);
-            toolTip.SetToolTip(soundPressureLabel, SoundPressureHint);
-            toolTip.SetToolTip(soundPressureCaption, SoundPressureHint);
+            soundPressureBlock.Controls.Add(soundPressureLabel);
+
+            // Heavier and a little larger than the number's weight would give, or it
+            // reads as a stray mark; raised to sit on the digits' midline.
+            soundPressureChevron = new Label
+            {
+                Text = "›",
+                ForeColor = Color.FromArgb(154, 162, 172),
+                Font = new Font("Segoe UI Semibold", 17f),
+                AutoSize = false,
+                Size = new Size(20, 30),
+                Location = new Point(132, 19),
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+            soundPressureBlock.Controls.Add(soundPressureChevron);
+
+            foreach (Control part in new Control[] { soundPressureBlock, soundPressureCaption, soundPressureLabel, soundPressureChevron })
+            {
+                part.Cursor = Cursors.Hand;
+                part.Click += (s, e) => ShowSoundLevelHistory();
+                part.MouseEnter += (s, e) => SetSoundPressureBlockHover(true);
+                part.MouseLeave += (s, e) => SetSoundPressureBlockHover(SoundPressureBlockUnderCursor());
+                if (part != soundPressureBlock) toolTip.SetToolTip(part, SoundPressureHint);
+            }
 
             Action layoutHeader = () =>
             {
@@ -945,14 +1006,10 @@ namespace Xm5ControlUi
                     appSettingsButton.Location = new Point(header.Width - appSettingsButton.Width - 22, 16);
                 }
 
-                int meterRight = header.Width - 22 - (appSettingsButton != null ? appSettingsButton.Width + 20 : 0);
-                if (soundPressureCaption != null && !soundPressureCaption.IsDisposed)
+                int meterRight = header.Width - 22 - (appSettingsButton != null ? appSettingsButton.Width + 12 : 0);
+                if (soundPressureBlock != null && !soundPressureBlock.IsDisposed)
                 {
-                    soundPressureCaption.Location = new Point(meterRight - soundPressureCaption.Width, 6);
-                }
-                if (soundPressureLabel != null && !soundPressureLabel.IsDisposed)
-                {
-                    soundPressureLabel.Location = new Point(meterRight - soundPressureLabel.Width, 24);
+                    soundPressureBlock.Location = new Point(meterRight - soundPressureBlock.Width, 3);
                 }
             };
             header.Resize += (s, e) => layoutHeader();
@@ -1743,19 +1800,6 @@ namespace Xm5ControlUi
             var menu = new ContextMenuStrip();
             menu.Items.Add("Open window", null, (s, e) => ShowWindow());
             menu.Items.Add("App settings...", null, (s, e) => ConfigureAppSettings());
-            // The headset allows one control session at a time, so a running
-            // tray meter is why the phone app cannot connect. That has to be
-            // undoable from the tray itself, without opening the window and
-            // taking the channel all over again to do it.
-            // Named for exactly when it takes effect. Pausing has no effect
-            // while the window is open, because the state refresh is holding
-            // the control channel every fifteen seconds regardless and the
-            // meter stopping would free nothing.
-            trayMeterPauseItem = new ToolStripMenuItem("Pause tray sound level when minimized");
-            trayMeterPauseItem.CheckOnClick = false;
-            trayMeterPauseItem.Click += (s, e) => ToggleTrayMeterPaused();
-            trayMeterPauseItem.Available = trayMeterEnabled;
-            menu.Items.Add(trayMeterPauseItem);
             menu.Items.Add(new ToolStripSeparator());
             AddTrayAction(menu.Items, "Noise cancelling", SetAncAsync);
             AddTrayAction(menu.Items, "Ambient sound: 12", () => SetAmbientAsync(12));
@@ -1787,6 +1831,27 @@ namespace Xm5ControlUi
             menu.Items.Add("Configure shortcuts...", null, (s, e) => ConfigureShortcuts());
 
             menu.Items.Add(new ToolStripSeparator());
+            // The sound level items sit at the bottom, not up with the window
+            // items: from a taskbar at the bottom of the screen this menu opens
+            // upwards, so the bottom is the end nearest the pointer.
+            //
+            // The headset allows one control session at a time, so a running
+            // tray meter is why the phone app cannot connect. That has to be
+            // undoable from the tray itself, without opening the window and
+            // taking the channel all over again to do it.
+            // Named for exactly when it takes effect. Pausing has no effect
+            // while the window is open, because the state refresh is holding
+            // the control channel every fifteen seconds regardless and the
+            // meter stopping would free nothing.
+            trayMeterPauseItem = new ToolStripMenuItem("Pause tray sound level when minimized");
+            trayMeterPauseItem.CheckOnClick = false;
+            trayMeterPauseItem.Click += (s, e) => ToggleTrayMeterPaused();
+            trayMeterPauseItem.Available = trayMeterEnabled;
+            menu.Items.Add(trayMeterPauseItem);
+            soundLevelHistoryItem = new ToolStripMenuItem("Sound level history...");
+            soundLevelHistoryItem.Click += (s, e) => ShowSoundLevelHistory();
+            soundLevelHistoryItem.Available = !soundPressureUnsupported;
+            menu.Items.Add(soundLevelHistoryItem);
             menu.Items.Add("Exit", null, (s, e) =>
             {
                 PostToUi(QueueImmediateExit);
@@ -1947,6 +2012,7 @@ namespace Xm5ControlUi
             startMinimizedToTray = false;
             trayNoticeShown = false;
             trayMeterEnabled = false;
+            soundLevelReference = DefaultSoundLevelReference;
             string path = AppSettingsConfigPath();
             if (!File.Exists(path)) return;
 
@@ -1977,6 +2043,11 @@ namespace Xm5ControlUi
                     {
                         trayMeterEnabled = ParseBool(value);
                     }
+                    else if (string.Equals(key, "SoundLevelReference", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int reference;
+                        if (int.TryParse(value, out reference) && reference >= 40 && reference <= 110) soundLevelReference = reference;
+                    }
                 }
             }
             catch
@@ -1995,7 +2066,8 @@ namespace Xm5ControlUi
                     "StartMinimizedInTray=" + (startMinimizedToTray ? "true" : "false"),
                     "MinimizeToTrayOnClose=" + (minimizeToTray ? "true" : "false"),
                     "TrayNoticeShown=" + (trayNoticeShown ? "true" : "false"),
-                    "ShowSoundLevelInTray=" + (trayMeterEnabled ? "true" : "false")
+                    "ShowSoundLevelInTray=" + (trayMeterEnabled ? "true" : "false"),
+                    "SoundLevelReference=" + soundLevelReference
                 });
             }
             catch
@@ -2154,6 +2226,58 @@ namespace Xm5ControlUi
                 if (lastActionLabel != null && !lastActionLabel.IsDisposed) lastActionLabel.Text = "App settings saved";
                 SetStatus("App settings saved", subdued);
             }
+        }
+
+        // The block's labels each raise their own enter and leave, and moving
+        // between them passes through a leave, so a leave only counts once the
+        // pointer is really outside the block.
+        private bool SoundPressureBlockUnderCursor()
+        {
+            if (soundPressureBlock == null || soundPressureBlock.IsDisposed) return false;
+            return soundPressureBlock.ClientRectangle.Contains(soundPressureBlock.PointToClient(Cursor.Position));
+        }
+
+        private void SetSoundPressureBlockHover(bool hover)
+        {
+            if (soundPressureBlockHover == hover || soundPressureBlock == null || soundPressureBlock.IsDisposed) return;
+            soundPressureBlockHover = hover;
+            // The same fill the gear uses on hover. The chevron brightens too,
+            // a change of lightness rather than of colour.
+            Color fill = hover ? Color.FromArgb(44, 48, 54) : page;
+            soundPressureBlock.BackColor = fill;
+            soundPressureBlock.BorderColor = fill;
+            soundPressureChevron.ForeColor = hover ? ink : Color.FromArgb(154, 162, 172);
+            soundPressureBlock.Invalidate(true);
+        }
+
+        // A window of its own rather than a section of the main one, which has
+        // no room left. It can stay open while the main window is in the tray.
+        private void ShowSoundLevelHistory()
+        {
+            if (IsClosing) return;
+            if (soundLevelHistoryForm == null || soundLevelHistoryForm.IsDisposed)
+            {
+                var form = new SoundLevelHistoryForm(soundLevelHistory, soundLevelReference, windowIcon, page, card, line, ink, subdued, blue, bluePressed);
+                form.ReferenceChanged += (s, e) =>
+                {
+                    soundLevelReference = form.Reference;
+                    SaveAppPreferences();
+                };
+                form.FormClosed += (s, e) =>
+                {
+                    if (ReferenceEquals(soundLevelHistoryForm, form)) soundLevelHistoryForm = null;
+                    // Hand the channel back at once if nothing else is watching.
+                    PostToUi(MeterSupervisorTick);
+                };
+                // Minimizing it can change whether the tray should look paused.
+                form.Resize += (s, e) => PostToUi(RefreshTrayMeter);
+                soundLevelHistoryForm = form;
+            }
+            soundLevelHistoryForm.Show();
+            if (soundLevelHistoryForm.WindowState == FormWindowState.Minimized) soundLevelHistoryForm.WindowState = FormWindowState.Normal;
+            soundLevelHistoryForm.Activate();
+            // Start the meter now rather than at the next tick.
+            MeterSupervisorTick();
         }
 
         private void ConfigureShortcuts()
@@ -2658,7 +2782,7 @@ namespace Xm5ControlUi
             // Checked before the window, because a locked desktop hides the
             // window just as thoroughly as it hides the tray icon.
             if (sessionLocked) return false;
-            if (WindowIsShowing) return true;
+            if (MeterIsWatched) return true;
             // Nothing on the window to read while it is in the tray, and holding
             // the control channel there would keep the phone app off it for a
             // number nobody can see. The tray icon is the exception: it shows
@@ -2855,6 +2979,7 @@ namespace Xm5ControlUi
             // to report while nothing is playing.
             var level = Regex.Match(match.Groups[1].Value, @"^(\d+)\s*dB$", RegexOptions.IgnoreCase);
             SetSoundPressureText(level.Success ? level.Groups[1].Value + " dB" : NoSoundPressureText);
+            soundLevelHistory.Record(DateTime.UtcNow, level.Success ? int.Parse(level.Groups[1].Value) : -1);
             trayMeterDigits = level.Success ? level.Groups[1].Value : NoSoundPressureText;
             RefreshTrayMeter();
         }
@@ -2983,7 +3108,7 @@ namespace Xm5ControlUi
         // tray and the window in disagreement about the same number.
         private bool TrayMeterPausedNow
         {
-            get { return trayMeterEnabled && trayMeterPaused && !WindowIsShowing; }
+            get { return trayMeterEnabled && trayMeterPaused && !MeterIsWatched; }
         }
 
         private void DisposeTrayMeterIcon()
@@ -3011,7 +3136,7 @@ namespace Xm5ControlUi
             if (trayMeterPauseItem != null) trayMeterPauseItem.Checked = trayMeterPaused;
             // Give the channel back at once rather than at the next tick, so
             // the phone app can have it the moment the user asks for it.
-            if (trayMeterPaused && !WindowIsShowing) StopMeterStream();
+            if (trayMeterPaused && !MeterIsWatched) StopMeterStream();
             RefreshTrayMeter();
         }
 
@@ -3026,6 +3151,11 @@ namespace Xm5ControlUi
             {
                 soundPressureLabel.Visible = supported;
             }
+            if (soundPressureBlock != null && !soundPressureBlock.IsDisposed)
+            {
+                soundPressureBlock.Visible = supported;
+            }
+            if (soundLevelHistoryItem != null) soundLevelHistoryItem.Available = supported;
             if (!supported) SetSoundPressureText(NoSoundPressureText);
         }
 
@@ -4552,6 +4682,12 @@ namespace Xm5ControlUi
             // kills it by hand.
             StopMeterStream();
 
+            if (soundLevelHistoryForm != null && !soundLevelHistoryForm.IsDisposed)
+            {
+                soundLevelHistoryForm.Close();
+                soundLevelHistoryForm = null;
+            }
+
             if (sessionSwitchHandler != null)
             {
                 SystemEvents.SessionSwitch -= sessionSwitchHandler;
@@ -5138,6 +5274,937 @@ namespace Xm5ControlUi
         public override string ToString()
         {
             return Text;
+        }
+    }
+
+    // One meter reading. A negative level is the headset saying nothing is
+    // playing, which is an answer, not a missing reading.
+    internal struct SoundLevelSample
+    {
+        public DateTime At;
+        public int Level;
+    }
+
+    internal sealed class SoundLevelStats
+    {
+        public int Peak = -1;
+        public DateTime PeakAt;
+        public double? Average;
+        public double AboveSeconds;
+        public double CoveredFraction;
+    }
+
+    // The last hour of meter readings, kept in memory only. Nothing here asks
+    // the headset for anything: it keeps what the meter stream already reads.
+    internal sealed class SoundLevelHistory
+    {
+        public static readonly TimeSpan Kept = TimeSpan.FromMinutes(60);
+        // A reading overdue by longer than this is a gap, not a slow reading.
+        // The same allowance the tray uses before dimming its digits: it clears
+        // a command borrowing the channel and the stream reconnecting, so the
+        // state refresh every fifteen seconds does not riddle the graph with
+        // holes that are not really missing audio.
+        public static readonly TimeSpan Overdue = TimeSpan.FromSeconds(10);
+        // How long a reading is taken to stand for when nothing follows it
+        // closely enough to say: about the stream's own interval.
+        public static readonly TimeSpan Nominal = TimeSpan.FromSeconds(1);
+
+        private readonly List<SoundLevelSample> samples = new List<SoundLevelSample>();
+
+        public List<SoundLevelSample> Samples
+        {
+            get { return samples; }
+        }
+
+        public void Record(DateTime at, int level)
+        {
+            samples.Add(new SoundLevelSample { At = at, Level = level });
+            // A little over the hour, so the left edge of the longest view
+            // still knows whether the reading before it ran on into view.
+            DateTime cutoff = at - Kept - TimeSpan.FromMinutes(1);
+            int stale = 0;
+            while (stale < samples.Count && samples[stale].At < cutoff) stale++;
+            if (stale > 0) samples.RemoveRange(0, stale);
+        }
+
+        // When the reading at index i stops counting: at the next reading if
+        // that came soon enough, otherwise one nominal interval on.
+        public DateTime EndOf(int i, DateTime now)
+        {
+            DateTime at = samples[i].At;
+            DateTime end = i + 1 < samples.Count && samples[i + 1].At - at <= Overdue
+                ? samples[i + 1].At
+                : at + Nominal;
+            return end > now ? (now > at ? now : at) : end;
+        }
+
+        public SoundLevelStats Measure(DateTime from, DateTime to, int reference, DateTime now)
+        {
+            var stats = new SoundLevelStats();
+            double covered = 0, levelTime = 0, energy = 0;
+            for (int i = 0; i < samples.Count; i++)
+            {
+                SoundLevelSample sample = samples[i];
+                if (sample.At > to) break;
+                DateTime end = EndOf(i, now);
+                if (end < from) continue;
+
+                if (sample.Level >= 0 && sample.At >= from && sample.Level > stats.Peak)
+                {
+                    stats.Peak = sample.Level;
+                    stats.PeakAt = sample.At;
+                }
+
+                DateTime start = sample.At < from ? from : sample.At;
+                if (end > to) end = to;
+                double seconds = (end - start).TotalSeconds;
+                if (seconds <= 0) continue;
+                covered += seconds;
+                if (sample.Level < 0) continue;
+                levelTime += seconds;
+                // An energy average, the way exposure is judged: ten minutes at
+                // 90 dB and ten at 70 average to 87, not to 80.
+                energy += seconds * Math.Pow(10, sample.Level / 10.0);
+                if (sample.Level > reference) stats.AboveSeconds += seconds;
+            }
+            double span = (to - from).TotalSeconds;
+            stats.CoveredFraction = span > 0 ? Math.Min(1, covered / span) : 0;
+            if (levelTime > 0) stats.Average = 10 * Math.Log10(energy / levelTime);
+            return stats;
+        }
+    }
+
+    internal sealed class SoundLevelGraph : Control
+    {
+        private const int PlotLeft = 44;
+        private const int PlotRight = 16;
+        private const int PlotTop = 26;
+        private const int PlotBottom = 26;
+        private const int MinimumDragPixels = 6;
+
+        private readonly SoundLevelHistory history;
+        private readonly Color ink;
+        private readonly Color subdued;
+        private readonly Color gridColor;
+        private readonly Color lineColor;
+        private readonly Color hatchColor;
+
+        private TimeSpan span = TimeSpan.FromMinutes(60);
+        private int reference = 85;
+        private DateTime? selectionFrom;
+        private DateTime? selectionTo;
+        private DateTime? dragFrom;
+        private DateTime? dragTo;
+        private int? hoverX;
+        private int dragStartX;
+
+        public event EventHandler SelectionChanged;
+
+        public SoundLevelGraph(SoundLevelHistory history, Color back, Color ink, Color subdued, Color gridColor, Color lineColor)
+        {
+            this.history = history;
+            this.ink = ink;
+            this.subdued = subdued;
+            this.gridColor = gridColor;
+            this.lineColor = lineColor;
+            hatchColor = Color.FromArgb(78, 78, 78);
+            BackColor = back;
+            Font = new Font("Segoe UI", 8.6f);
+            Cursor = Cursors.Cross;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        public TimeSpan Span
+        {
+            get { return span; }
+            set { span = value; ClearSelection(); Invalidate(); }
+        }
+
+        public int Reference
+        {
+            get { return reference; }
+            set { reference = value; Invalidate(); }
+        }
+
+        public bool HasSelection
+        {
+            get { return selectionFrom.HasValue; }
+        }
+
+        public DateTime SelectionFrom
+        {
+            get { return selectionFrom.Value; }
+        }
+
+        public DateTime SelectionTo
+        {
+            get { return selectionTo.Value; }
+        }
+
+        public void ClearSelection()
+        {
+            bool had = selectionFrom.HasValue;
+            selectionFrom = null;
+            selectionTo = null;
+            Invalidate();
+            if (had && SelectionChanged != null) SelectionChanged(this, EventArgs.Empty);
+        }
+
+        // The span the figures describe: the selection if there is one,
+        // otherwise everything on screen.
+        public void GetScope(DateTime now, out DateTime from, out DateTime to)
+        {
+            if (selectionFrom.HasValue)
+            {
+                from = selectionFrom.Value;
+                to = selectionTo.Value > now ? now : selectionTo.Value;
+            }
+            else
+            {
+                from = now - span;
+                to = now;
+            }
+        }
+
+        private Rectangle Plot
+        {
+            get
+            {
+                return new Rectangle(PlotLeft, PlotTop,
+                    Math.Max(10, Width - PlotLeft - PlotRight),
+                    Math.Max(10, Height - PlotTop - PlotBottom));
+            }
+        }
+
+        private float XOf(DateTime at, DateTime viewStart, Rectangle plot)
+        {
+            return plot.Left + (float)((at - viewStart).TotalSeconds / span.TotalSeconds * plot.Width);
+        }
+
+        private DateTime TimeAt(int x, DateTime now)
+        {
+            Rectangle plot = Plot;
+            double fraction = Math.Max(0, Math.Min(1, (x - plot.Left) / (double)plot.Width));
+            return now - span + TimeSpan.FromSeconds(fraction * span.TotalSeconds);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            DateTime now = DateTime.UtcNow;
+            dragStartX = e.X;
+            dragFrom = TimeAt(e.X, now);
+            dragTo = dragFrom;
+            Capture = true;
+            Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            hoverX = e.X;
+            if (dragFrom.HasValue) dragTo = TimeAt(e.X, DateTime.UtcNow);
+            Invalidate();
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (!dragFrom.HasValue) return;
+            Capture = false;
+            DateTime a = dragFrom.Value;
+            DateTime b = TimeAt(e.X, DateTime.UtcNow);
+            dragFrom = null;
+            dragTo = null;
+            // A click rather than a drag lets go of the selection.
+            if (Math.Abs(e.X - dragStartX) < MinimumDragPixels)
+            {
+                selectionFrom = null;
+                selectionTo = null;
+            }
+            else
+            {
+                selectionFrom = a < b ? a : b;
+                selectionTo = a < b ? b : a;
+            }
+            Invalidate();
+            if (SelectionChanged != null) SelectionChanged(this, EventArgs.Empty);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            hoverX = null;
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(BackColor);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            DateTime now = DateTime.UtcNow;
+            DateTime viewStart = now - span;
+            Rectangle plot = Plot;
+            List<SoundLevelSample> samples = history.Samples;
+
+            // The scale fits the usual listening range and only grows to take
+            // in a reading or a reference line outside it.
+            int low = 50, high = 100;
+            for (int i = 0; i < samples.Count; i++)
+            {
+                SoundLevelSample s = samples[i];
+                if (s.Level < 0 || s.At < viewStart) continue;
+                low = Math.Min(low, s.Level / 10 * 10);
+                high = Math.Max(high, (s.Level + 9) / 10 * 10);
+            }
+            low = Math.Min(low, reference / 10 * 10);
+            high = Math.Max(high, (reference + 9) / 10 * 10);
+            Func<double, float> yOf = level => plot.Bottom - (float)((level - low) / (double)(high - low) * plot.Height);
+
+            DrawGrid(g, plot, low, high, yOf);
+            DrawGaps(g, plot, samples, viewStart, now);
+            DrawSelection(g, plot, viewStart);
+            DrawLevels(g, plot, samples, viewStart, now, yOf);
+            DrawReference(g, plot, yOf);
+            DrawTimeAxis(g, plot, viewStart, now);
+            DrawPeak(g, plot, viewStart, now, yOf);
+            DrawHover(g, plot, samples, now);
+        }
+
+        private void DrawGrid(Graphics g, Rectangle plot, int low, int high, Func<double, float> yOf)
+        {
+            int step = high - low > 60 ? 20 : 10;
+            using (var pen = new Pen(gridColor))
+            {
+                for (int level = low; level <= high; level += step)
+                {
+                    float y = yOf(level);
+                    g.DrawLine(pen, plot.Left, y, plot.Right, y);
+                    var box = new Rectangle(0, (int)y - 9, plot.Left - 8, 18);
+                    TextRenderer.DrawText(g, level.ToString(), Font, box, subdued, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                }
+            }
+        }
+
+        // Missing readings are hatched rather than left looking like silence,
+        // and the line is broken across them rather than joined, so a stretch
+        // nobody measured can never pass for a quiet one.
+        private void DrawGaps(Graphics g, Rectangle plot, List<SoundLevelSample> samples, DateTime viewStart, DateTime now)
+        {
+            var gaps = new List<KeyValuePair<DateTime, DateTime>>();
+            DateTime covered = viewStart;
+            for (int i = 0; i < samples.Count; i++)
+            {
+                DateTime end = history.EndOf(i, now);
+                if (end < viewStart) continue;
+                if (samples[i].At - covered >= SoundLevelHistory.Overdue)
+                {
+                    gaps.Add(new KeyValuePair<DateTime, DateTime>(covered, samples[i].At));
+                }
+                if (end > covered) covered = end;
+            }
+            if (now - covered >= SoundLevelHistory.Overdue)
+            {
+                gaps.Add(new KeyValuePair<DateTime, DateTime>(covered, now));
+            }
+
+            using (var pen = new Pen(hatchColor, 1.4f))
+            {
+                foreach (var gap in gaps)
+                {
+                    float left = Math.Max(plot.Left, XOf(gap.Key, viewStart, plot));
+                    float right = Math.Min(plot.Right, XOf(gap.Value, viewStart, plot));
+                    if (right - left < 1) continue;
+                    var area = new RectangleF(left, plot.Top, right - left, plot.Height);
+                    GraphicsState state = g.Save();
+                    g.SetClip(area);
+                    for (float x = left - plot.Height; x < right; x += 8)
+                    {
+                        g.DrawLine(pen, x, plot.Bottom, x + plot.Height, plot.Top);
+                    }
+                    g.Restore(state);
+                    if (right - left >= 90)
+                    {
+                        var box = new Rectangle((int)left, plot.Top + 4, (int)(right - left), 18);
+                        using (var back = new SolidBrush(BackColor))
+                        {
+                            Size text = TextRenderer.MeasureText("No readings", Font);
+                            g.FillRectangle(back, box.Left + (box.Width - text.Width) / 2 - 4, box.Top, text.Width + 8, box.Height);
+                        }
+                        TextRenderer.DrawText(g, "No readings", Font, box, Color.FromArgb(190, 198, 207), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                    }
+                }
+            }
+        }
+
+        private void DrawSelection(Graphics g, Rectangle plot, DateTime viewStart)
+        {
+            DateTime? a = dragFrom.HasValue ? dragFrom : selectionFrom;
+            DateTime? b = dragFrom.HasValue ? dragTo : selectionTo;
+            if (!a.HasValue || !b.HasValue) return;
+            float x1 = XOf(a.Value < b.Value ? a.Value : b.Value, viewStart, plot);
+            float x2 = XOf(a.Value < b.Value ? b.Value : a.Value, viewStart, plot);
+            x1 = Math.Max(plot.Left, x1);
+            x2 = Math.Min(plot.Right, x2);
+            if (x2 <= x1) return;
+            // Lighter, not a different hue: the selection has to read without
+            // relying on colour.
+            using (var wash = new SolidBrush(Color.FromArgb(24, 255, 255, 255)))
+            using (var edge = new Pen(Color.FromArgb(150, ink)))
+            {
+                g.FillRectangle(wash, x1, plot.Top, x2 - x1, plot.Height);
+                g.DrawLine(edge, x1, plot.Top, x1, plot.Bottom);
+                g.DrawLine(edge, x2, plot.Top, x2, plot.Bottom);
+            }
+        }
+
+        // One point per pixel column. Where a column holds several readings, a
+        // faint band shows their range around the line through their mean, so
+        // a short loud moment is not averaged out of sight on the longer spans.
+        private void DrawLevels(Graphics g, Rectangle plot, List<SoundLevelSample> samples, DateTime viewStart, DateTime now, Func<double, float> yOf)
+        {
+            bool band = span.TotalSeconds / plot.Width > 1.5;
+            var line = new List<PointF>();
+            var top = new List<PointF>();
+            var bottom = new List<PointF>();
+            int column = int.MinValue;
+            int min = 0, max = 0, count = 0;
+            double sum = 0;
+            DateTime lastAt = DateTime.MinValue;
+
+            using (var linePen = new Pen(lineColor, 2f) { LineJoin = LineJoin.Round })
+            using (var bandBrush = new SolidBrush(Color.FromArgb(60, lineColor)))
+            using (var dotBrush = new SolidBrush(lineColor))
+            {
+                Action flushColumn = () =>
+                {
+                    if (count == 0) return;
+                    float x = column + 0.5f;
+                    line.Add(new PointF(x, yOf(sum / count)));
+                    top.Add(new PointF(x, yOf(max)));
+                    bottom.Add(new PointF(x, yOf(min)));
+                    count = 0;
+                };
+                Action flushSegment = () =>
+                {
+                    flushColumn();
+                    if (line.Count == 1)
+                    {
+                        g.FillEllipse(dotBrush, line[0].X - 1.5f, line[0].Y - 1.5f, 3, 3);
+                    }
+                    else if (line.Count > 1)
+                    {
+                        if (band)
+                        {
+                            var outline = new List<PointF>(top);
+                            for (int i = bottom.Count - 1; i >= 0; i--) outline.Add(bottom[i]);
+                            g.FillPolygon(bandBrush, outline.ToArray());
+                        }
+                        g.DrawLines(linePen, line.ToArray());
+                    }
+                    line.Clear();
+                    top.Clear();
+                    bottom.Clear();
+                };
+
+                for (int i = 0; i < samples.Count; i++)
+                {
+                    SoundLevelSample s = samples[i];
+                    if (s.At < viewStart) { lastAt = s.At; continue; }
+                    bool gap = lastAt != DateTime.MinValue && s.At - lastAt > SoundLevelHistory.Overdue;
+                    lastAt = s.At;
+                    if (s.Level < 0 || gap) flushSegment();
+                    if (s.Level < 0) continue;
+
+                    int x = (int)Math.Floor(XOf(s.At, viewStart, plot));
+                    if (x != column)
+                    {
+                        flushColumn();
+                        column = x;
+                    }
+                    if (count == 0) { min = s.Level; max = s.Level; sum = 0; }
+                    min = Math.Min(min, s.Level);
+                    max = Math.Max(max, s.Level);
+                    sum += s.Level;
+                    count++;
+                }
+                flushSegment();
+            }
+        }
+
+        private void DrawReference(Graphics g, Rectangle plot, Func<double, float> yOf)
+        {
+            float y = yOf(reference);
+            using (var pen = new Pen(ink, 1.3f) { DashPattern = new float[] { 5, 4 } })
+            {
+                g.DrawLine(pen, plot.Left, y, plot.Right, y);
+            }
+            string text = reference + " dB";
+            Size size = TextRenderer.MeasureText(text, Font);
+            var box = new Rectangle(plot.Right - size.Width - 6, (int)y - size.Height - 2, size.Width + 4, size.Height);
+            using (var back = new SolidBrush(BackColor))
+            {
+                g.FillRectangle(back, box);
+            }
+            TextRenderer.DrawText(g, text, Font, box, ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+
+        // Ticks on round clock times, so the labels do not shift every second,
+        // with "now" pinned to the right edge.
+        private void DrawTimeAxis(Graphics g, Rectangle plot, DateTime viewStart, DateTime now)
+        {
+            int minutes = span.TotalMinutes <= 5 ? 1 : span.TotalMinutes <= 15 ? 3 : span.TotalMinutes <= 30 ? 5 : 10;
+            var box = new Rectangle(0, plot.Bottom + 6, 0, 16);
+            DateTime localStart = viewStart.ToLocalTime();
+            DateTime tick = new DateTime(localStart.Year, localStart.Month, localStart.Day, localStart.Hour, 0, 0, DateTimeKind.Local);
+            while (tick < localStart) tick = tick.AddMinutes(minutes);
+            float nowX = plot.Right;
+            for (; tick.ToUniversalTime() < now; tick = tick.AddMinutes(minutes))
+            {
+                float x = XOf(tick.ToUniversalTime(), viewStart, plot);
+                if (x - plot.Left < 18 || nowX - x < 44) continue;
+                box.X = (int)x - 30;
+                box.Width = 60;
+                TextRenderer.DrawText(g, tick.ToString("HH:mm"), Font, box, subdued, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+            box.X = plot.Right - 60;
+            box.Width = 60;
+            TextRenderer.DrawText(g, "now", Font, box, subdued, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+
+        private void DrawPeak(Graphics g, Rectangle plot, DateTime viewStart, DateTime now, Func<double, float> yOf)
+        {
+            if (dragFrom.HasValue) return;
+            DateTime from, to;
+            GetScope(now, out from, out to);
+            if (from < viewStart) from = viewStart;
+            SoundLevelStats stats = history.Measure(from, to, reference, now);
+            if (stats.Peak < 0) return;
+
+            float x = XOf(stats.PeakAt, viewStart, plot);
+            float y = yOf(stats.Peak);
+            using (var brush = new SolidBrush(ink))
+            {
+                g.FillPolygon(brush, new[] { new PointF(x - 5, y - 13), new PointF(x + 5, y - 13), new PointF(x, y - 5) });
+            }
+            string text = "Peak " + stats.Peak;
+            using (var bold = new Font("Segoe UI Semibold", 9f))
+            {
+                Size size = TextRenderer.MeasureText(text, bold);
+                int left = (int)x - size.Width / 2;
+                left = Math.Max(plot.Left, Math.Min(plot.Right - size.Width, left));
+                int topY = Math.Max(0, (int)y - 15 - size.Height);
+                TextRenderer.DrawText(g, text, bold, new Point(left, topY), ink, TextFormatFlags.NoPadding);
+            }
+        }
+
+        private void DrawHover(Graphics g, Rectangle plot, List<SoundLevelSample> samples, DateTime now)
+        {
+            if (!hoverX.HasValue || dragFrom.HasValue) return;
+            int hx = hoverX.Value;
+            if (hx < plot.Left || hx > plot.Right) return;
+
+            DateTime at = TimeAt(hx, now);
+            string reading = "no reading";
+            TimeSpan best = SoundLevelHistory.Overdue;
+            for (int i = 0; i < samples.Count; i++)
+            {
+                if (at < samples[i].At - best) break;
+                TimeSpan distance = samples[i].At > at ? samples[i].At - at : at - samples[i].At;
+                if (distance <= best)
+                {
+                    best = distance;
+                    reading = samples[i].Level < 0 ? "nothing playing" : samples[i].Level + " dB";
+                }
+            }
+
+            using (var pen = new Pen(Color.FromArgb(190, 198, 207)) { DashPattern = new float[] { 2, 3 } })
+            {
+                g.DrawLine(pen, hx, plot.Top, hx, plot.Bottom);
+            }
+            string text = at.ToLocalTime().ToString("HH:mm:ss") + "   " + reading;
+            using (var bold = new Font("Segoe UI Semibold", 9f))
+            {
+                Size size = TextRenderer.MeasureText(text, bold);
+                var box = new Rectangle(hx + 10, plot.Bottom - size.Height - 14, size.Width + 16, size.Height + 8);
+                if (box.Right > plot.Right) box.X = hx - 10 - box.Width;
+                g.SmoothingMode = SmoothingMode.None;
+                using (var back = new SolidBrush(Color.FromArgb(43, 43, 43)))
+                using (var border = new Pen(gridColor))
+                {
+                    g.FillRectangle(back, box);
+                    g.DrawRectangle(border, box);
+                }
+                TextRenderer.DrawText(g, text, bold, box, ink, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+        }
+    }
+
+    internal sealed class SoundLevelHistoryForm : Form
+    {
+        private static readonly int[] SpanMinutes = { 5, 15, 30, 60 };
+        private static readonly int[] ReferenceLevels = { 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100 };
+
+        private readonly SoundLevelHistory history;
+        private readonly Color page;
+        private readonly Color card;
+        private readonly Color ink;
+        private readonly Color subdued;
+        private readonly Color blue;
+        private readonly Color bluePressed;
+        private readonly Color inactive = Color.FromArgb(61, 67, 76);
+        private readonly Color inactivePressed = Color.FromArgb(50, 55, 63);
+        private readonly System.Windows.Forms.Timer tick;
+
+        private SoundLevelGraph graph;
+        private Label nowLabel;
+        private Label scopeLabel;
+        private PillButton clearButton;
+        private ChoiceDropdown referenceBox;
+        private readonly PillButton[] spanButtons = new PillButton[SpanMinutes.Length];
+        private readonly Label[] tileValues = new Label[4];
+        private readonly Label[] tileDetails = new Label[4];
+        private readonly Label[] tileCaptions = new Label[4];
+        private readonly CardPanel[] tiles = new CardPanel[4];
+        private CardPanel graphCard;
+        private Label referenceCaption;
+
+        public event EventHandler ReferenceChanged;
+
+        public int Reference { get; private set; }
+
+        public SoundLevelHistoryForm(SoundLevelHistory history, int reference, Icon icon, Color page, Color card, Color line, Color ink, Color subdued, Color blue, Color bluePressed)
+        {
+            this.history = history;
+            this.page = page;
+            this.card = card;
+            this.ink = ink;
+            this.subdued = subdued;
+            this.blue = blue;
+            this.bluePressed = bluePressed;
+            Reference = reference;
+
+            Text = "Sound level history";
+            Icon = icon;
+            StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MaximizeBox = true;
+            ClientSize = new Size(760, 540);
+            MinimumSize = new Size(560, 460);
+            BackColor = page;
+            ForeColor = ink;
+            Font = new Font("Segoe UI", 10f);
+
+            Build(line);
+
+            tick = new System.Windows.Forms.Timer { Interval = 1000 };
+            tick.Tick += (s, e) => RefreshView();
+        }
+
+        // Showing depends on whether this window is actually visible, which
+        // is what earns the meter the control channel; see ShouldRunMeter.
+        public bool IsShowing
+        {
+            get { return !IsDisposed && Visible && WindowState != FormWindowState.Minimized; }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                int enabled = 1;
+                DwmSetWindowAttribute(Handle, 20, ref enabled, sizeof(int));
+                DwmSetWindowAttribute(Handle, 19, ref enabled, sizeof(int));
+                int caption = ColorTranslator.ToWin32(page);
+                int captionText = ColorTranslator.ToWin32(ink);
+                DwmSetWindowAttribute(Handle, 35, ref caption, sizeof(int));
+                DwmSetWindowAttribute(Handle, 36, ref captionText, sizeof(int));
+                DwmSetWindowAttribute(Handle, 34, ref caption, sizeof(int));
+            }
+            catch
+            {
+            }
+        }
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            tick.Start();
+            RefreshView();
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            tick.Stop();
+            tick.Dispose();
+            base.OnFormClosed(e);
+        }
+
+        private void Build(Color line)
+        {
+            var nowCaption = new Label
+            {
+                Text = "Now",
+                ForeColor = Color.FromArgb(190, 198, 207),
+                Font = new Font("Segoe UI Semibold", 9.2f),
+                AutoSize = true,
+                Location = new Point(22, 14)
+            };
+            Controls.Add(nowCaption);
+
+            nowLabel = new Label
+            {
+                Text = "—",
+                ForeColor = ink,
+                Font = new Font("Segoe UI Semibold", 17f),
+                AutoSize = true,
+                Location = new Point(18, 32)
+            };
+            Controls.Add(nowLabel);
+
+            for (int i = 0; i < SpanMinutes.Length; i++)
+            {
+                int minutes = SpanMinutes[i];
+                var button = new PillButton(minutes == 60 ? "1 hour" : minutes + " min", inactive, inactivePressed)
+                {
+                    Size = new Size(76, 32),
+                    Anchor = AnchorStyles.Top | AnchorStyles.Right
+                };
+                button.Click += (s, e) => SetSpan(minutes);
+                spanButtons[i] = button;
+                Controls.Add(button);
+            }
+
+            graphCard = new CardPanel
+            {
+                BackColor = card,
+                BorderColor = line,
+                Radius = 8,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom
+            };
+            Controls.Add(graphCard);
+
+            graph = new SoundLevelGraph(history, card, ink, subdued, line, blue)
+            {
+                Reference = Reference,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom
+            };
+            graph.SelectionChanged += (s, e) => RefreshView();
+            graphCard.Controls.Add(graph);
+
+            scopeLabel = new Label
+            {
+                ForeColor = Color.FromArgb(190, 198, 207),
+                Font = new Font("Segoe UI", 9.2f),
+                AutoSize = false,
+                AutoEllipsis = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom
+            };
+            Controls.Add(scopeLabel);
+
+            clearButton = new PillButton("Clear selection", inactive, inactivePressed)
+            {
+                Size = new Size(124, 28),
+                Anchor = AnchorStyles.Right | AnchorStyles.Bottom,
+                Visible = false
+            };
+            clearButton.Click += (s, e) => graph.ClearSelection();
+            Controls.Add(clearButton);
+
+            string[] captions = { "Peak", "Average", "Above " + Reference + " dB", "Readings" };
+            for (int i = 0; i < tiles.Length; i++)
+            {
+                var tile = new CardPanel { BackColor = card, BorderColor = card, Radius = 8, Anchor = AnchorStyles.Left | AnchorStyles.Bottom };
+                tileCaptions[i] = new Label { Text = captions[i], ForeColor = subdued, BackColor = card, Font = new Font("Segoe UI", 9f), AutoSize = true, Location = new Point(12, 8) };
+                tileValues[i] = new Label { Text = "—", ForeColor = ink, BackColor = card, Font = new Font("Segoe UI Semibold", 14f), AutoSize = true, Location = new Point(10, 26) };
+                tileDetails[i] = new Label { ForeColor = Color.FromArgb(190, 198, 207), BackColor = card, Font = new Font("Segoe UI", 8.6f), AutoSize = true, Location = new Point(12, 56) };
+                tile.Controls.Add(tileCaptions[i]);
+                tile.Controls.Add(tileValues[i]);
+                tile.Controls.Add(tileDetails[i]);
+                tiles[i] = tile;
+                Controls.Add(tile);
+            }
+
+            referenceCaption = new Label
+            {
+                Text = "Reference line",
+                ForeColor = Color.FromArgb(190, 198, 207),
+                Font = new Font("Segoe UI Semibold", 9.2f),
+                AutoSize = true,
+                Anchor = AnchorStyles.Left | AnchorStyles.Bottom
+            };
+            Controls.Add(referenceCaption);
+
+            referenceBox = new ChoiceDropdown
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                BackColor = Color.FromArgb(43, 43, 43),
+                ForeColor = ink,
+                FlatStyle = FlatStyle.Flat,
+                Width = 104,
+                Anchor = AnchorStyles.Left | AnchorStyles.Bottom
+            };
+            int selected = 0;
+            for (int i = 0; i < ReferenceLevels.Length; i++)
+            {
+                referenceBox.Items.Add(ReferenceLevels[i] + " dB");
+                if (Math.Abs(ReferenceLevels[i] - Reference) < Math.Abs(ReferenceLevels[selected] - Reference)) selected = i;
+            }
+            referenceBox.SelectedIndex = selected;
+            referenceBox.SelectedIndexChanged += (s, e) =>
+            {
+                if (referenceBox.SelectedIndex < 0) return;
+                Reference = ReferenceLevels[referenceBox.SelectedIndex];
+                graph.Reference = Reference;
+                tileCaptions[2].Text = "Above " + Reference + " dB";
+                RefreshView();
+                if (ReferenceChanged != null) ReferenceChanged(this, EventArgs.Empty);
+            };
+            Controls.Add(referenceBox);
+
+            Resize += (s, e) => LayoutControls();
+            LayoutControls();
+            SetSpan(60);
+        }
+
+        private void LayoutControls()
+        {
+            int margin = 18;
+            int width = ClientSize.Width;
+            int height = ClientSize.Height;
+
+            int right = width - margin;
+            for (int i = spanButtons.Length - 1; i >= 0; i--)
+            {
+                spanButtons[i].Location = new Point(right - spanButtons[i].Width, 26);
+                right = spanButtons[i].Left - 6;
+            }
+
+            int footerTop = height - margin - 30;
+            referenceCaption.Location = new Point(margin + 2, footerTop + 6);
+            referenceBox.Location = new Point(referenceCaption.Right + 10, footerTop);
+            referenceBox.Height = 30;
+
+            int tileHeight = 80;
+            int tileTop = footerTop - 14 - tileHeight;
+            int gapBetween = 10;
+            int tileWidth = (width - margin * 2 - gapBetween * (tiles.Length - 1)) / tiles.Length;
+            for (int i = 0; i < tiles.Length; i++)
+            {
+                tiles[i].Bounds = new Rectangle(margin + i * (tileWidth + gapBetween), tileTop, tileWidth, tileHeight);
+            }
+
+            int scopeTop = tileTop - 10 - 28;
+            clearButton.Location = new Point(width - margin - clearButton.Width, scopeTop);
+            scopeLabel.Bounds = new Rectangle(margin + 2, scopeTop, width - margin * 2 - clearButton.Width - 12, 28);
+
+            graphCard.Bounds = new Rectangle(margin, 76, width - margin * 2, Math.Max(80, scopeTop - 8 - 76));
+            graph.Bounds = new Rectangle(4, 6, graphCard.Width - 8, graphCard.Height - 10);
+        }
+
+        private void SetSpan(int minutes)
+        {
+            for (int i = 0; i < SpanMinutes.Length; i++)
+            {
+                bool on = SpanMinutes[i] == minutes;
+                spanButtons[i].SetPalette(on ? blue : inactive, on ? bluePressed : inactivePressed);
+            }
+            graph.Span = TimeSpan.FromMinutes(minutes);
+            RefreshView();
+        }
+
+        private void RefreshView()
+        {
+            if (IsDisposed) return;
+            DateTime now = DateTime.UtcNow;
+            List<SoundLevelSample> samples = history.Samples;
+
+            // Dimmed means the number has stopped being refreshed, the same as
+            // the tray and the main window.
+            if (samples.Count == 0)
+            {
+                SetText(nowLabel, "—");
+                nowLabel.ForeColor = subdued;
+            }
+            else
+            {
+                SoundLevelSample last = samples[samples.Count - 1];
+                SetText(nowLabel, last.Level < 0 ? "—" : last.Level + " dB");
+                nowLabel.ForeColor = now - last.At > SoundLevelHistory.Overdue ? subdued : ink;
+            }
+
+            DateTime from, to;
+            graph.GetScope(now, out from, out to);
+            SoundLevelStats stats = history.Measure(from, to, Reference, now);
+
+            if (graph.HasSelection)
+            {
+                double minutes = (to - from).TotalMinutes;
+                string length = minutes < 1 ? Math.Round((to - from).TotalSeconds) + " s" : Math.Round(minutes) + " min";
+                SetText(scopeLabel, "Selection " + from.ToLocalTime().ToString("HH:mm:ss") + " – " + to.ToLocalTime().ToString("HH:mm:ss") + " (" + length + ")");
+            }
+            else
+            {
+                int spanMinutes = (int)graph.Span.TotalMinutes;
+                SetText(scopeLabel, (spanMinutes == 60 ? "Last hour" : "Last " + spanMinutes + " minutes") + " · drag across the graph to measure part of it");
+            }
+            clearButton.Visible = graph.HasSelection;
+
+            if (stats.Peak >= 0)
+            {
+                SetText(tileValues[0], stats.Peak + " dB");
+                SetText(tileDetails[0], "at " + stats.PeakAt.ToLocalTime().ToString("HH:mm:ss"));
+            }
+            else
+            {
+                SetText(tileValues[0], "—");
+                SetText(tileDetails[0], "");
+            }
+
+            if (stats.Average.HasValue)
+            {
+                int average = (int)Math.Round(stats.Average.Value);
+                SetText(tileValues[1], average + " dB");
+                int over = average - Reference;
+                // Said in words, not by colouring the number.
+                SetText(tileDetails[1], over > 0 ? over + " dB over the " + Reference + " dB line"
+                    : over == 0 ? "at the " + Reference + " dB line"
+                    : -over + " dB under the " + Reference + " dB line");
+            }
+            else
+            {
+                SetText(tileValues[1], "—");
+                SetText(tileDetails[1], "while playing");
+            }
+
+            SetText(tileValues[2], FormatDuration(stats.AboveSeconds));
+            SetText(tileDetails[2], stats.AboveSeconds > 0 ? "while playing" : "");
+
+            SetText(tileValues[3], (int)Math.Round(stats.CoveredFraction * 100) + "%");
+            SetText(tileDetails[3], graph.HasSelection ? "of the selection" : "of this span");
+
+            graph.Invalidate();
+        }
+
+        private static string FormatDuration(double seconds)
+        {
+            if (seconds < 60) return Math.Round(seconds) + " s";
+            double minutes = seconds / 60;
+            return (minutes < 10 ? minutes.ToString("0.0") : Math.Round(minutes).ToString()) + " min";
+        }
+
+        private static void SetText(Label label, string text)
+        {
+            if (label.Text != text) label.Text = text;
         }
     }
 
