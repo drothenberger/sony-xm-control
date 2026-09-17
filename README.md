@@ -31,6 +31,7 @@ Unofficial Windows controller for Sony 1000X headphones and earbuds.
 - Automatic power off setting
 - Tray quick actions
 - Optional sound pressure reading on the tray icon
+- Sound level history for the last hour, with peak and average
 - Configurable global keyboard shortcuts
 
 ## Download
@@ -191,6 +192,24 @@ when paused, and dimmed digits when the reading has stopped being refreshed.
 Dimming therefore means something is wrong, never that the level has changed
 and never that you asked for it — pausing has its own shape precisely so it
 cannot be mistaken for a fault. The tooltip says which in words.
+
+Clicking the reading in the window header, or "Sound level history..." in the
+tray menu, opens a graph of the last hour, with 5, 15 and 30 minute views as
+well. It shows the peak, the average, how long the level spent above a
+reference line, and how much of the span actually has readings. Dragging across
+the graph measures just that stretch, which is the easy way to check one song
+played loud. The reference line defaults to 85 dB and can be set from 50 to
+100 dB; it is saved with the app settings.
+
+The average is an energy average over the time something was playing, the way
+exposure is judged, so ten minutes at 90 dB and ten at 70 average to 87 rather
+than 80. Nothing extra is asked of the headset: the history is kept from the
+readings the meter already takes, in memory only, so it starts empty each time
+the app does and only covers time when the meter was running. A reading more
+than ten seconds overdue is drawn as a hatched gap rather than joined across,
+so an unmeasured stretch cannot pass for a quiet one. The window counts as
+watching the level, so while it is open and not minimized it keeps the meter
+running even with the tray reading off or paused.
 
 Useful when adding support for a new model:
 
