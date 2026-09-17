@@ -5621,16 +5621,32 @@ namespace Xm5ControlUi
             }
         }
 
-        // One point per pixel column. Where a column holds several readings, a
-        // faint band shows their range around the line through their mean, so
-        // a short loud moment is not averaged out of sight on the longer spans.
+        // Readings arrive about a second apart, so on the shorter spans a pixel
+        // column is worth barely more than one of them: there each reading gets
+        // its own point at its own time, and a dip between tracks keeps its
+        // full depth. Only where a column really holds several readings are
+        // they summarised, with a faint band for their range around the line
+        // through their mean, so a short loud moment is not averaged out of
+        // sight on the longer spans.
+        //
+        // Either way the columns are pinned to the clock, not to the left edge
+        // of the view. Anchored to the view they re-formed on every repaint as
+        // it scrolled: the same readings averaged together differently each
+        // second, so a dip flickered between its own depth and its neighbours'
+        // mean, and the line stretched and squeezed instead of scrolling.
         private void DrawLevels(Graphics g, Rectangle plot, List<SoundLevelSample> samples, DateTime viewStart, DateTime now, Func<double, float> yOf)
         {
-            bool band = span.TotalSeconds / plot.Width > 1.5;
+            long columnTicks = Math.Max(1, span.Ticks / plot.Width);
+            bool band = columnTicks > 2 * SoundLevelHistory.Nominal.Ticks;
+            // One column per reading, in other words, since no two share a tick.
+            if (!band) columnTicks = 1;
+
             var line = new List<PointF>();
             var top = new List<PointF>();
             var bottom = new List<PointF>();
-            int column = int.MinValue;
+            long column = long.MinValue;
+            DateTime columnStartedAt = DateTime.MinValue;
+            long offsetTicks = 0;
             int min = 0, max = 0, count = 0;
             double sum = 0;
             DateTime lastAt = DateTime.MinValue;
@@ -5642,7 +5658,12 @@ namespace Xm5ControlUi
                 Action flushColumn = () =>
                 {
                     if (count == 0) return;
-                    float x = column + 0.5f;
+                    // Placed at the mean of the readings' own times, so the
+                    // point sits where they are and slides with the view by
+                    // fractions of a pixel rather than snapping to a whole one.
+                    // The times are summed as offsets from the first in the
+                    // column, because a sum of absolute ticks would overflow.
+                    float x = XOf(columnStartedAt.AddTicks(offsetTicks / count), viewStart, plot);
                     line.Add(new PointF(x, yOf(sum / count)));
                     top.Add(new PointF(x, yOf(max)));
                     bottom.Add(new PointF(x, yOf(min)));
@@ -5679,13 +5700,24 @@ namespace Xm5ControlUi
                     if (s.Level < 0 || gap) flushSegment();
                     if (s.Level < 0) continue;
 
-                    int x = (int)Math.Floor(XOf(s.At, viewStart, plot));
-                    if (x != column)
+                    long here = s.At.Ticks / columnTicks;
+                    if (here != column)
                     {
                         flushColumn();
-                        column = x;
+                        column = here;
                     }
-                    if (count == 0) { min = s.Level; max = s.Level; sum = 0; }
+                    if (count == 0)
+                    {
+                        min = s.Level;
+                        max = s.Level;
+                        sum = 0;
+                        columnStartedAt = s.At;
+                        offsetTicks = 0;
+                    }
+                    else
+                    {
+                        offsetTicks += (s.At - columnStartedAt).Ticks;
+                    }
                     min = Math.Min(min, s.Level);
                     max = Math.Max(max, s.Level);
                     sum += s.Level;
