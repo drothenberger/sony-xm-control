@@ -2794,7 +2794,8 @@ namespace Xm5ControlUi
                     // bright is a second thing separating it from stale digits.
                     rendered = paused
                         ? RenderPausedIcon(Color.FromArgb(226, 230, 235))
-                        : RenderDigitsIcon(text, digits);
+                        : RenderDigitsIcon(text, digits,
+                            digits == TrayBatteryLowColor || digits == TrayBatteryCriticalColor);
                 }
                 catch
                 {
@@ -2823,15 +2824,20 @@ namespace Xm5ControlUi
         // would claim something nobody currently knows.
         private Color TrayDigitsColor(bool dim)
         {
-            if (dim) return Color.FromArgb(128, 134, 142);
+            if (dim) return TrayDigitsDimColor;
             if (batteryListeningLevel.HasValue &&
                 DateTime.UtcNow - batteryReadAt < TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes))
             {
-                if (batteryListeningLevel.Value < BatteryCriticalPercent) return Color.FromArgb(255, 99, 88);
-                if (batteryListeningLevel.Value < BatteryLowPercent) return Color.FromArgb(255, 222, 0);
+                if (batteryListeningLevel.Value < BatteryCriticalPercent) return TrayBatteryCriticalColor;
+                if (batteryListeningLevel.Value < BatteryLowPercent) return TrayBatteryLowColor;
             }
-            return Color.FromArgb(226, 230, 235);
+            return TrayDigitsColorNormal;
         }
+
+        private static readonly Color TrayDigitsColorNormal = Color.FromArgb(226, 230, 235);
+        private static readonly Color TrayDigitsDimColor = Color.FromArgb(128, 134, 142);
+        private static readonly Color TrayBatteryLowColor = Color.FromArgb(255, 222, 0);
+        private static readonly Color TrayBatteryCriticalColor = Color.FromArgb(255, 99, 88);
 
         // Pausing only takes effect once the window is out of the way, so this
         // is also the only time the icon should claim to be paused. With the
@@ -4509,12 +4515,18 @@ namespace Xm5ControlUi
         // readings run from the low thirties to the low nineties; a third digit
         // only turns up at volumes nobody listens at, and is left to shrink
         // rather than be truncated into a number that would simply be wrong.
-        private static Icon RenderDigitsIcon(string text, Color color)
+        //
+        // A low battery also puts a bar under the digits. Colour alone did not
+        // carry it: at tray size, yellow digits on a dark taskbar can pass for
+        // white to a red/green colour blind user, so the warning needs a shape that
+        // is there or not whatever colour it is seen as. The digits give up
+        // the bar's height only while it is shown.
+        private static Icon RenderDigitsIcon(string text, Color color, bool batteryBar)
         {
             var bitmap = new Bitmap(32, 32);
             try
             {
-                var box = new RectangleF(1f, 1f, 30f, 30f);
+                var box = batteryBar ? new RectangleF(1f, 0f, 30f, 24f) : new RectangleF(1f, 1f, 30f, 30f);
                 using (var g = Graphics.FromImage(bitmap))
                 using (var brush = new SolidBrush(color))
                 using (var format = new StringFormat(StringFormat.GenericTypographic))
@@ -4522,6 +4534,7 @@ namespace Xm5ControlUi
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                     g.Clear(Color.Transparent);
+                    if (batteryBar) FillRound(g, brush, new Rectangle(2, 25, 28, 6), 2);
                     format.Alignment = StringAlignment.Center;
                     format.LineAlignment = StringAlignment.Center;
                     using (var font = FitFont(g, text, box.Width, box.Height, format))
