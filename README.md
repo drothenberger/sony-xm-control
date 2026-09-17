@@ -173,12 +173,13 @@ The tray digits turn yellow when the lower earbud drops below 30% and red below
 features off. Only a recent reading colours them, and dimming for a stalled reading takes
 precedence, so grey still means only that the number has stopped updating.
 
-The icon has four appearances and they are meant to be told apart: bright
-digits for a live reading, a bright dash when nothing is playing, two bright
-bars when paused, and dimmed digits when the reading has stopped being
-refreshed. Dimming therefore means something is wrong, never that the level has
-changed and never that you asked for it — pausing has its own shape precisely
-so it cannot be mistaken for a fault. The tooltip says which in words.
+The icon has five appearances and they are meant to be told apart: bright
+digits for a live reading, a bright dash when nothing is playing, a bright
+`Off` when Safe Listening is switched off in Sound Connect, two bright bars
+when paused, and dimmed digits when the reading has stopped being refreshed.
+Dimming therefore means something is wrong, never that the level has changed
+and never that you asked for it — pausing has its own shape precisely so it
+cannot be mistaken for a fault. The tooltip says which in words.
 
 Useful when adding support for a new model:
 
