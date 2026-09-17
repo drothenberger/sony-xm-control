@@ -1759,7 +1759,9 @@ namespace Xm5ControlUi
             // by the meter stream while the tray meter runs; with neither, the
             // last reading stays, and says how old it is rather than passing
             // for current.
-            string battery = BatteryText(" ");
+            // Dots rather than bare spaces between the parts: "R docked Case 74%"
+            // runs the words together.
+            string battery = BatteryText(" · ");
             if (battery != null)
             {
                 TimeSpan age = DateTime.UtcNow - batteryReadAt;
@@ -1771,7 +1773,7 @@ namespace Xm5ControlUi
                 // the age does: an old reading without its age would pass for
                 // a current one.
                 string line = title + "\n" + battery + suffix;
-                if (line.Length > 63) line = title + "\n" + batteryLevelsText.Replace("   ", " ") + suffix;
+                if (line.Length > 63) line = title + "\n" + batteryLevelsText.Replace("   ", " · ") + suffix;
                 if (line.Length <= 63) title = line;
             }
             return title.Length <= 63 ? title : title.Substring(0, 63);
@@ -2947,6 +2949,8 @@ namespace Xm5ControlUi
                 // is not being listened on, so it does not count towards the
                 // warning, and it is shown as docked rather than as flat; a
                 // bud that really was flat would have switched itself off.
+                // "Docked" rather than "in case", which would sit next to the
+                // "Case" level that follows.
                 int left = int.Parse(buds.Groups[1].Value);
                 int right = int.Parse(buds.Groups[2].Value);
                 batteryLevelsText = "L " + BudLevelText(left) + "   R " + BudLevelText(right);
@@ -2979,7 +2983,7 @@ namespace Xm5ControlUi
 
         private static string BudLevelText(int level)
         {
-            return level == 0 ? "in case" : level + "%";
+            return level == 0 ? "docked" : level + "%";
         }
 
         private string BatteryText(string gap)
