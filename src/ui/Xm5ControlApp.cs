@@ -323,6 +323,13 @@ namespace Xm5ControlUi
         // Long enough that the stream is limited by the supervisor rather than
         // by running out of samples: a day at the interval above.
         private const int MeterStreamSamples = 108000;
+        // The stream also asks whether Safe Listening is on, before its first
+        // reading and then this many readings apart. Switched off, the headset
+        // keeps answering the meter with one frozen level marked valid, so the
+        // readings alone cannot show it. Often enough that switching it back on
+        // shows within a few seconds; each ask costs tens of milliseconds on a
+        // channel the stream already holds.
+        private const int MeterStreamSafeListeningEvery = 5;
         private const int MeterSupervisorIntervalMs = 1000;
         private const int MeterStaleAfterMs = 4000;
         private const int MeterRestartDelayMs = 2000;
@@ -378,6 +385,7 @@ namespace Xm5ControlUi
         private Process meterProcess;
         private bool meterGateHeld;
         private bool meterStale;
+        private bool safeListeningOff;
         private DateTime lastMeterReadingAt = DateTime.MinValue;
         private DateTime meterStreamFailedAt = DateTime.MinValue;
         private bool soundPressureUnsupported;
@@ -410,9 +418,11 @@ namespace Xm5ControlUi
         // An em dash, not "0 dB": the headset reports no reading at all when
         // nothing is playing, and for a few seconds after playback starts.
         private const string NoSoundPressureText = "\u2014";
+        private const string SafeListeningOffText = "Off";
         private const string SoundPressureHint =
             "Level of the audio playing through the headset, ignoring noise cancelling.\r\n" +
-            "Shows \u2014 while nothing is playing, and for a few seconds after playback starts.";
+            "Shows \u2014 while nothing is playing, and for a few seconds after playback starts.\r\n" +
+            "Shows Off while Safe Listening is switched off in Sound Connect.";
         private Label speakToChatLabel;
         private Label wearPauseLabel;
         private Label touchPanelLabel;
@@ -2339,7 +2349,8 @@ namespace Xm5ControlUi
                     FileName = backendPath,
                     Arguments = WithDevice("soundpressure --samples " + MeterStreamSamples +
                                            " --interval " + MeterStreamIntervalMs +
-                                           " --timeout " + MeterStreamTimeoutMs),
+                                           " --timeout " + MeterStreamTimeoutMs +
+                                           " --safe-listening-every " + MeterStreamSafeListeningEvery),
                     WorkingDirectory = Path.GetDirectoryName(backendPath),
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
@@ -2424,11 +2435,23 @@ namespace Xm5ControlUi
         {
             if (IsClosing || string.IsNullOrEmpty(line)) return;
 
+            var safeListening = Regex.Match(line, @"^safe listening:\s*(on|off)\s*$", RegexOptions.IgnoreCase);
+            if (safeListening.Success)
+            {
+                safeListeningOff = safeListening.Groups[1].Value.Equals("off", StringComparison.OrdinalIgnoreCase);
+                if (safeListeningOff) SetSoundPressureText(SafeListeningOffText);
+                return;
+            }
+
             var match = Regex.Match(line, @"^sound pressure:\s*(.+?)\s*$", RegexOptions.IgnoreCase);
             if (!match.Success) return;
 
             lastMeterReadingAt = DateTime.UtcNow;
             SetMeterStale(false);
+
+            // Still a sign the stream is alive, but not a level: with Safe
+            // Listening off the headset repeats one frozen value as if valid.
+            if (safeListeningOff) return;
 
             // "none" is a real answer, not a failure: the headset has no level
             // to report while nothing is playing.

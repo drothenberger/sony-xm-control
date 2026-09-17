@@ -62,6 +62,7 @@ typedef struct {
     int ambient_level;
     int samples;      /* soundpressure: readings taken per connection */
     int interval_ms;  /* soundpressure: gap between those readings */
+    int safe_listening_every; /* soundpressure: readings between 52 03 checks, 0 = never */
     /* NC/ambient changes; -1 leaves the current device value alone. */
     int set_mode;        /* 0 = off, 1 = anc, 2 = ambient */
     int set_level;       /* 0..20 */
@@ -80,6 +81,7 @@ static void print_usage(void) {
     puts("  xm5ctl ncasm-set [--mode anc|ambient|off] [--level 0..20] [--voice on|off]");
     puts("                   [--auto on|off] [--sensitivity low|standard|high]");
     puts("  xm5ctl soundpressure [--samples N] [--interval MS] [--timeout MS]");
+    puts("                       [--safe-listening-every N]");
     puts("  xm5ctl listen [--timeout MS] [--hex]");
     puts("  xm5ctl raw \"22 00\" [--data-type mdr|mdr2] [--ack-only] [--no-ack]");
     puts("  xm5ctl batch \"22 00;66 17;E6 01\" [--timeout MS] [--name TEXT]");
@@ -547,6 +549,18 @@ static void print_device_info(const uint8_t *json, size_t len) {
 }
 
 /*
+ * 53 03 answers 52 03. The two bytes after the inquired type are both zero
+ * while Safe Listening is switched off in Sound Connect and nonzero while it is
+ * on (03 03 seen, and 01 03 / 01 01 in older captures), whatever Listening
+ * History is set to. The rest is undecoded listening records. It matters
+ * because with Safe Listening off the meter does not go quiet: 5A 03 keeps
+ * answering with one frozen level, marked valid.
+ */
+static void print_safe_listening(const uint8_t *p) {
+    printf("safe listening: %s\n", p[2] == 0 && p[3] == 0 ? "off" : "on");
+}
+
+/*
  * Live sound pressure: the dB level of the audio playing through the headset,
  * measured after the volume stage and ignoring noise cancelling. Status 0x03
  * marks a real reading; anything else means the headset has none to give,
@@ -588,6 +602,10 @@ static void print_known_payload(const mdr_frame_t *frame) {
      */
     if (p[0] == 0x5b && n >= 2 && p[1] == 0x03) {
         print_sound_pressure(p, n);
+        return;
+    }
+    if (p[0] == 0x53 && n >= 4 && p[1] == 0x03 && frame->data_type == 0x0e) {
+        print_safe_listening(p);
         return;
     }
 
@@ -1019,6 +1037,9 @@ static bool parse_options(int argc, char **argv, options_t *opt) {
         } else if (strcmp(argv[i], "--interval") == 0 && i + 1 < argc) {
             opt->interval_ms = atoi(argv[++i]);
             if (opt->interval_ms < 0) opt->interval_ms = 0;
+        } else if (strcmp(argv[i], "--safe-listening-every") == 0 && i + 1 < argc) {
+            opt->safe_listening_every = atoi(argv[++i]);
+            if (opt->safe_listening_every < 0) opt->safe_listening_every = 0;
         } else if (strcmp(argv[i], "--hex") == 0) {
             g_hex_dump = true;
         } else if (strcmp(argv[i], "--no-ack") == 0) {
@@ -1306,9 +1327,16 @@ static int invoke_ncasm_set(const options_t *opt) {
  * Connect reads it about once a second; --samples keeps that cadence on a
  * single connection so a run of readings costs one RFCOMM setup instead of
  * one per reading.
+ *
+ * --safe-listening-every asks 52 03 before the first reading and every N
+ * readings after, on the same connection, so the caller can tell a frozen
+ * level from a live one.
  */
 static int invoke_sound_pressure(const options_t *opt) {
     static const uint8_t payload[] = { 0x5a, 0x03 };
+    static const uint8_t safe_listening[] = { 0x52, 0x03 };
+    int safe_listening_every = opt->safe_listening_every;
+    uint8_t seq = 0;
     SOCKET s;
     wchar_t selected[BLUETOOTH_MAX_NAME_SIZE] = L"";
 
@@ -1328,8 +1356,25 @@ static int invoke_sound_pressure(const options_t *opt) {
             Sleep((DWORD)opt->interval_ms);
         }
 
-        count = send_payload_seq(s, payload, sizeof(payload), 0x0e, (uint8_t)(sample & 1),
+        if (safe_listening_every > 0 && sample % safe_listening_every == 0) {
+            count = send_payload_seq(s, safe_listening, sizeof(safe_listening), 0x0e, seq,
+                                     opt->timeout_ms, opt->no_ack, 0x53, responses, (int)ARRAY_LEN(responses));
+            seq ^= 1;
+            if (count < 0) {
+                closesocket(s);
+                return 1;
+            }
+            /* A model without it would otherwise cost a full timeout every
+               time it is asked. */
+            if (count == 0) safe_listening_every = 0;
+            for (int i = 0; i < count; i++) {
+                print_known_payload(&responses[i]);
+            }
+        }
+
+        count = send_payload_seq(s, payload, sizeof(payload), 0x0e, seq,
                                  opt->timeout_ms, opt->no_ack, 0x5b, responses, (int)ARRAY_LEN(responses));
+        seq ^= 1;
         if (count < 0) {
             closesocket(s);
             return 1;

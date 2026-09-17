@@ -125,6 +125,14 @@ as a dash rather than 0 dB. A dropped link is shown differently again: the last
 reading stays on screen and dims, because losing the link says nothing about
 whether anything is playing.
 
+The reading only works while Safe Listening is switched on in Sony's Sound
+Connect app. With it off the headset does not stop answering: it repeats one
+frozen level and still marks it valid, so the number alone cannot be told from a
+live one. The setting is read separately with `52 03`, whose reply carries two
+bytes that are both zero while it is off, and the meter shows `Off` rather than a
+level that is not moving. It is asked alongside every fifth reading, so
+switching Safe Listening back on is picked up within a few seconds.
+
 The headset does not push the value, so it has to be asked, and asking once per
 reading does not work: opening the control channel can take longer than the
 interval worth asking for, as described below. One backend run therefore streams
