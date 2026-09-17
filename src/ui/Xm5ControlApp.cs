@@ -1745,8 +1745,11 @@ namespace Xm5ControlUi
             }
             else if (trayMeterEnabled && trayMeterDigits != null)
             {
-                title += trayMeterDigits == NoSoundPressureText
-                    ? " - nothing playing"
+                title += trayMeterDigits == NoSoundPressureText ? " - nothing playing"
+                    // Not a level and not a fault: the headset stops measuring
+                    // until Safe Listening is switched back on in Sound Connect,
+                    // which the icon cannot say in three characters.
+                    : trayMeterDigits == SafeListeningOffText ? " - Safe Listening is off"
                     : " - " + trayMeterDigits + " dB";
                 // The icon says this by dimming; the tooltip has room to say it
                 // in words, and a number nobody flagged as stopped is the one
@@ -2704,7 +2707,15 @@ namespace Xm5ControlUi
             if (safeListening.Success)
             {
                 safeListeningOff = safeListening.Groups[1].Value.Equals("off", StringComparison.OrdinalIgnoreCase);
-                if (safeListeningOff) SetSoundPressureText(SafeListeningOffText);
+                if (safeListeningOff)
+                {
+                    SetSoundPressureText(SafeListeningOffText);
+                    // The tray has to say it too, or the icon keeps showing the
+                    // last live number as if it were still being measured. The
+                    // next reading puts the digits back when it is switched on.
+                    trayMeterDigits = SafeListeningOffText;
+                    RefreshTrayMeter();
+                }
                 return;
             }
 
