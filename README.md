@@ -199,7 +199,8 @@ well. It shows the peak, the average, how long the level spent above a
 reference line, and how much of the span actually has readings. Dragging across
 the graph measures just that stretch, which is the easy way to check one song
 played loud. The reference line defaults to 85 dB and can be set from 50 to
-100 dB; it is saved with the app settings.
+100 dB. Both it and the view you last picked are saved with the app settings,
+so the window opens the way you left it rather than back at the hour.
 
 The average is an energy average over the time something was playing, the way
 exposure is judged, so ten minutes at 90 dB and ten at 70 average to 87 rather
