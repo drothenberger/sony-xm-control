@@ -2,6 +2,35 @@
 
 Unofficial Windows controller for Sony 1000X headphones and earbuds.
 
+> **This is a fork.** The original project is
+> [Ripthulhu/sony-xm-control](https://github.com/Ripthulhu/sony-xm-control).
+> The changes here are being offered upstream, starting with
+> [PR #1](https://github.com/Ripthulhu/sony-xm-control/pull/1). Until they are
+> merged, this branch has all of them together.
+>
+> **What the fork adds:**
+>
+> - WF-1000XM6 fixes: noise control state, auto ambient and its sensitivity,
+>   both earbud levels plus the case, and a 10-band equalizer (reading it failed
+>   and writes sent a 6-band payload)
+> - The active codec, which device it is playing from, and connection quality
+>   with a Low Latency option
+> - A live sound pressure reading, optionally on the tray icon, and a history
+>   window for the last hour
+> - Battery levels in the tray tooltip, with a warning colour when an earbud
+>   runs low
+> - Settings no longer jump back when a background refresh overlaps a click,
+>   connecting waits long enough to succeed, a clear message when another app holds the
+>   headset, and only one copy of the app runs at a time
+>
+> **Testing:** only on WF-1000XM6 earbuds (firmware 0150). The WH-1000XM5,
+> WF-1000XM5 and WH-1000XM6 paths are untested. Please open an issue if
+> something is wrong on those.
+>
+> **No release builds yet.** Build from source as described under
+> [Build](#build). The Releases page mentioned below belongs to the original
+> project and does not include these changes.
+
 ![XM Control screenshot](docs/screenshot.png)
 
 ## Supported Devices
