@@ -469,6 +469,7 @@ namespace Xm5ControlUi
         private bool soundPressureBlockHover;
         private ToolStripMenuItem soundLevelHistoryItem;
         private int soundLevelReference = DefaultSoundLevelReference;
+        private int soundLevelSpanMinutes = DefaultSoundLevelSpanMinutes;
         private bool sessionLocked;
         // Held so it can be unhooked: SystemEvents keeps a static strong
         // reference, which would otherwise outlive the form and call back into
@@ -561,6 +562,9 @@ namespace Xm5ControlUi
         // Where the history graph draws its reference line until the user picks
         // another: the level workplace hearing guidance starts from.
         private const int DefaultSoundLevelReference = 85;
+        // Which span the history window opens on until the user picks another.
+        // The longest one, which shows everything that is kept.
+        private const int DefaultSoundLevelSpanMinutes = 60;
         private Label speakToChatLabel;
         private Label wearPauseLabel;
         private Label touchPanelLabel;
@@ -2013,6 +2017,7 @@ namespace Xm5ControlUi
             trayNoticeShown = false;
             trayMeterEnabled = false;
             soundLevelReference = DefaultSoundLevelReference;
+            soundLevelSpanMinutes = DefaultSoundLevelSpanMinutes;
             string path = AppSettingsConfigPath();
             if (!File.Exists(path)) return;
 
@@ -2048,6 +2053,13 @@ namespace Xm5ControlUi
                         int reference;
                         if (int.TryParse(value, out reference) && reference >= 40 && reference <= 110) soundLevelReference = reference;
                     }
+                    else if (string.Equals(key, "SoundLevelSpanMinutes", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int minutes;
+                        // One of the buttons only, so a hand-edited file
+                        // cannot leave the window with no span selected.
+                        if (int.TryParse(value, out minutes) && SoundLevelHistoryForm.HasSpan(minutes)) soundLevelSpanMinutes = minutes;
+                    }
                 }
             }
             catch
@@ -2067,7 +2079,8 @@ namespace Xm5ControlUi
                     "MinimizeToTrayOnClose=" + (minimizeToTray ? "true" : "false"),
                     "TrayNoticeShown=" + (trayNoticeShown ? "true" : "false"),
                     "ShowSoundLevelInTray=" + (trayMeterEnabled ? "true" : "false"),
-                    "SoundLevelReference=" + soundLevelReference
+                    "SoundLevelReference=" + soundLevelReference,
+                    "SoundLevelSpanMinutes=" + soundLevelSpanMinutes
                 });
             }
             catch
@@ -2257,10 +2270,15 @@ namespace Xm5ControlUi
             if (IsClosing) return;
             if (soundLevelHistoryForm == null || soundLevelHistoryForm.IsDisposed)
             {
-                var form = new SoundLevelHistoryForm(soundLevelHistory, soundLevelReference, windowIcon, page, card, line, ink, subdued, blue, bluePressed);
+                var form = new SoundLevelHistoryForm(soundLevelHistory, soundLevelReference, soundLevelSpanMinutes, windowIcon, page, card, line, ink, subdued, blue, bluePressed);
                 form.ReferenceChanged += (s, e) =>
                 {
                     soundLevelReference = form.Reference;
+                    SaveAppPreferences();
+                };
+                form.SpanChanged += (s, e) =>
+                {
+                    soundLevelSpanMinutes = form.SpanMinutes;
                     SaveAppPreferences();
                 };
                 form.FormClosed += (s, e) =>
@@ -5846,7 +5864,8 @@ namespace Xm5ControlUi
 
     internal sealed class SoundLevelHistoryForm : Form
     {
-        private static readonly int[] SpanMinutes = { 5, 15, 30, 60 };
+        private static readonly int[] SpanChoices = { 5, 15, 30, 60 };
+        private const int DefaultSpanMinutes = 60;
         private static readonly int[] ReferenceLevels = { 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100 };
 
         private readonly SoundLevelHistory history;
@@ -5865,7 +5884,7 @@ namespace Xm5ControlUi
         private Label scopeLabel;
         private PillButton clearButton;
         private ChoiceDropdown referenceBox;
-        private readonly PillButton[] spanButtons = new PillButton[SpanMinutes.Length];
+        private readonly PillButton[] spanButtons = new PillButton[SpanChoices.Length];
         private readonly Label[] tileValues = new Label[4];
         private readonly Label[] tileDetails = new Label[4];
         private readonly Label[] tileCaptions = new Label[4];
@@ -5874,10 +5893,18 @@ namespace Xm5ControlUi
         private Label referenceCaption;
 
         public event EventHandler ReferenceChanged;
+        public event EventHandler SpanChanged;
 
         public int Reference { get; private set; }
 
-        public SoundLevelHistoryForm(SoundLevelHistory history, int reference, Icon icon, Color page, Color card, Color line, Color ink, Color subdued, Color blue, Color bluePressed)
+        public int SpanMinutes { get; private set; }
+
+        public static bool HasSpan(int minutes)
+        {
+            return Array.IndexOf(SpanChoices, minutes) >= 0;
+        }
+
+        public SoundLevelHistoryForm(SoundLevelHistory history, int reference, int spanMinutes, Icon icon, Color page, Color card, Color line, Color ink, Color subdued, Color blue, Color bluePressed)
         {
             this.history = history;
             this.page = page;
@@ -5887,6 +5914,7 @@ namespace Xm5ControlUi
             this.blue = blue;
             this.bluePressed = bluePressed;
             Reference = reference;
+            SpanMinutes = HasSpan(spanMinutes) ? spanMinutes : DefaultSpanMinutes;
 
             Text = "Sound level history";
             Icon = icon;
@@ -5970,9 +5998,9 @@ namespace Xm5ControlUi
             };
             Controls.Add(nowLabel);
 
-            for (int i = 0; i < SpanMinutes.Length; i++)
+            for (int i = 0; i < SpanChoices.Length; i++)
             {
-                int minutes = SpanMinutes[i];
+                int minutes = SpanChoices[i];
                 var button = new PillButton(minutes == 60 ? "1 hour" : minutes + " min", inactive, inactivePressed)
                 {
                     Size = new Size(76, 32),
@@ -6073,7 +6101,7 @@ namespace Xm5ControlUi
 
             Resize += (s, e) => LayoutControls();
             LayoutControls();
-            SetSpan(60);
+            SetSpan(SpanMinutes);
         }
 
         private void LayoutControls()
@@ -6113,13 +6141,17 @@ namespace Xm5ControlUi
 
         private void SetSpan(int minutes)
         {
-            for (int i = 0; i < SpanMinutes.Length; i++)
+            bool changed = SpanMinutes != minutes;
+            SpanMinutes = minutes;
+            for (int i = 0; i < SpanChoices.Length; i++)
             {
-                bool on = SpanMinutes[i] == minutes;
+                bool on = SpanChoices[i] == minutes;
                 spanButtons[i].SetPalette(on ? blue : inactive, on ? bluePressed : inactivePressed);
             }
             graph.Span = TimeSpan.FromMinutes(minutes);
             RefreshView();
+            // Not on the call from Build, which only restores what was saved.
+            if (changed && SpanChanged != null) SpanChanged(this, EventArgs.Empty);
         }
 
         private void RefreshView()
