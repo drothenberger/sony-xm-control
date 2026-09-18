@@ -5510,18 +5510,23 @@ namespace Xm5ControlUi
             Rectangle plot = Plot;
             List<SoundLevelSample> samples = history.Samples;
 
-            // The scale fits the usual listening range and only grows to take
-            // in a reading or a reference line outside it.
-            int low = 50, high = 100;
+            // Nought to a hundred decibels, whatever is on screen, so that a
+            // height means the same thing from one glance to the next. Fitting
+            // the scale to the readings in view instead meant the whole graph
+            // jumped the moment a dip to zero or a loud moment crossed the left
+            // edge and stopped counting - and it jumped hardest exactly when
+            // something worth looking at had just happened. The reference line
+            // never needs more than a hundred, since that is the highest that
+            // can be picked.
+            int low = 0, high = 100;
             for (int i = 0; i < samples.Count; i++)
             {
                 SoundLevelSample s = samples[i];
                 if (s.Level < 0 || s.At < viewStart) continue;
-                low = Math.Min(low, s.Level / 10 * 10);
-                high = Math.Max(high, (s.Level + 9) / 10 * 10);
+                // A reading louder than the scale still has to fit, or the line
+                // would be drawn off the top of the plot.
+                high = Math.Max(high, (s.Level + 19) / 20 * 20);
             }
-            low = Math.Min(low, reference / 10 * 10);
-            high = Math.Max(high, (reference + 9) / 10 * 10);
             Func<double, float> yOf = level => plot.Bottom - (float)((level - low) / (double)(high - low) * plot.Height);
 
             DrawGrid(g, plot, low, high, yOf);
@@ -5536,7 +5541,9 @@ namespace Xm5ControlUi
 
         private void DrawGrid(Graphics g, Rectangle plot, int low, int high, Func<double, float> yOf)
         {
-            int step = high - low > 60 ? 20 : 10;
+            // Every twentieth decibel: the scale starts at nought and reaches
+            // at least a hundred, so a finer grid would only crowd it.
+            const int step = 20;
             using (var pen = new Pen(gridColor))
             {
                 for (int level = low; level <= high; level += step)
