@@ -469,6 +469,11 @@ namespace Xm5ControlUi
         // The lowest level that limits listening - the lower bud, or the one
         // level an over-ear model reports - or null before any reading.
         private int? batteryListeningLevel;
+        // Each bud and the case, for colouring each part of the window's row on
+        // its own. A docked bud is null, since it warns of nothing.
+        private int? batteryLeftLevel;
+        private int? batteryRightLevel;
+        private int? batteryCaseLevel;
         private Color trayIconColorDrawn;
         private bool autoDetectRunning;
         // Whether the last scan found the headset connected. Distinct from
@@ -1394,6 +1399,7 @@ namespace Xm5ControlUi
             AddEyebrow(parent, "Device", 62);
             connectionLabel = AddActionRow(parent, "Connection", "Waiting", 84);
             batteryLabel = AddActionRow(parent, "Battery", "Waiting", 128);
+            batteryLabel.Paint += PaintBatteryRow;
             codecLabel = AddActionRow(parent, "Codec", "Waiting", 172);
             soundQualityButton = NewOptionButton("Quality");
             stableButton = NewOptionButton("Stability");
@@ -2284,6 +2290,9 @@ namespace Xm5ControlUi
                 batteryLevelsText = null;
                 batteryCaseText = null;
                 batteryListeningLevel = null;
+                batteryLeftLevel = null;
+                batteryRightLevel = null;
+                batteryCaseLevel = null;
             }
             if (IsClosing) return changed;
 
@@ -2491,11 +2500,12 @@ namespace Xm5ControlUi
             if (IsClosing) return;
 
             // The battery age in the tooltip, and whether a low battery may
-            // still colour the digits, move with the clock rather than with any
+            // still colour the digits and the window's row, move with the clock rather than with any
             // reading, so something has to look at them. Neither reaches the
             // shell unless the result actually changed.
             ApplyTrayIcon();
             ApplyTrayTooltip();
+            if (batteryLabel != null) batteryLabel.Invalidate();
 
             // Support is a protocol capability, not a form factor, so it is
             // probed rather than inferred from the model name.
@@ -2838,13 +2848,18 @@ namespace Xm5ControlUi
         private Color TrayDigitsColor(bool dim)
         {
             if (dim) return TrayDigitsDimColor;
-            if (batteryListeningLevel.HasValue &&
-                DateTime.UtcNow - batteryReadAt < TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes))
-            {
-                if (batteryListeningLevel.Value < BatteryCriticalPercent) return TrayBatteryCriticalColor;
-                if (batteryListeningLevel.Value < BatteryLowPercent) return TrayBatteryLowColor;
-            }
-            return TrayDigitsColorNormal;
+            return BatteryWarningColor(batteryListeningLevel) ?? TrayDigitsColorNormal;
+        }
+
+        // The warning colour for one battery level, or null when it needs none,
+        // shared by the tray digits and the window's row so the two agree.
+        private Color? BatteryWarningColor(int? level)
+        {
+            if (!level.HasValue ||
+                DateTime.UtcNow - batteryReadAt >= TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes)) return null;
+            if (level.Value < BatteryCriticalPercent) return TrayBatteryCriticalColor;
+            if (level.Value < BatteryLowPercent) return TrayBatteryLowColor;
+            return null;
         }
 
         private static readonly Color TrayDigitsColorNormal = Color.FromArgb(226, 230, 235);
@@ -2965,6 +2980,8 @@ namespace Xm5ControlUi
                 int left = int.Parse(buds.Groups[1].Value);
                 int right = int.Parse(buds.Groups[2].Value);
                 batteryLevelsText = "L " + BudLevelText(left) + "   R " + BudLevelText(right);
+                batteryLeftLevel = left == 0 ? (int?)null : left;
+                batteryRightLevel = right == 0 ? (int?)null : right;
                 batteryListeningLevel = left == 0 ? (right == 0 ? (int?)null : right)
                     : right == 0 ? left
                     : Math.Min(left, right);
@@ -2975,21 +2992,72 @@ namespace Xm5ControlUi
                 // coarser answer to the same question and does not replace them.
                 batteryLevelsText = FormatBatteryText(single.Groups[1].Value);
                 batteryCaseText = null;
+                batteryCaseLevel = null;
                 batteryListeningLevel = int.Parse(Regex.Match(single.Groups[1].Value, @"\d+").Value);
             }
             else if (!cradle.Success)
             {
                 return;
             }
-            if (cradle.Success) batteryCaseText = "Case " + cradle.Groups[1].Value + "%";
+            if (cradle.Success)
+            {
+                batteryCaseText = "Case " + cradle.Groups[1].Value + "%";
+                batteryCaseLevel = int.Parse(cradle.Groups[1].Value);
+            }
 
             batteryReadAt = DateTime.UtcNow;
             if (batteryLabel != null && batteryLevelsText != null)
             {
-                batteryLabel.Text = BatteryText("   ");
+                // The row is drawn by PaintBatteryRow, part by part, so the
+                // label's own text is kept empty and only names it.
+                batteryLabel.Text = "";
+                batteryLabel.AccessibleName = BatteryText(", ");
+                batteryLabel.Invalidate();
             }
             ApplyTrayIcon();
             ApplyTrayTooltip();
+        }
+
+        // Each bud and the case get their own colour, so the one running low
+        // stands out from the ones that are fine, with the tray's thresholds.
+        private void PaintBatteryRow(object sender, PaintEventArgs e)
+        {
+            var label = (Label)sender;
+            if (batteryLevelsText == null) return;
+
+            var parts = new List<KeyValuePair<string, int?>>();
+            string[] levels = batteryLevelsText.Split(new[] { "   " }, StringSplitOptions.None);
+            if (levels.Length == 2)
+            {
+                parts.Add(new KeyValuePair<string, int?>(levels[0], batteryLeftLevel));
+                parts.Add(new KeyValuePair<string, int?>(levels[1], batteryRightLevel));
+            }
+            else
+            {
+                parts.Add(new KeyValuePair<string, int?>(batteryLevelsText, batteryListeningLevel));
+            }
+            if (batteryCaseText != null) parts.Add(new KeyValuePair<string, int?>(batteryCaseText, batteryCaseLevel));
+            // An old reading says how old, as the tooltip does, since it has
+            // also lost any warning colour and would otherwise pass for fresh.
+            TimeSpan age = DateTime.UtcNow - batteryReadAt;
+            if (age >= TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes))
+            {
+                parts.Add(new KeyValuePair<string, int?>("(" + FormatAge(age) + " ago)", null));
+            }
+
+            // Where the label would have put its first character, and each
+            // part's advance measured against a trailing mark, since a run
+            // ending in spaces does not measure its spaces.
+            const TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+            int x = (TextRenderer.MeasureText(e.Graphics, "x", label.Font).Width -
+                     TextRenderer.MeasureText(e.Graphics, "x", label.Font, Size.Empty, flags).Width) / 2;
+            int mark = TextRenderer.MeasureText(e.Graphics, ".", label.Font, Size.Empty, flags).Width;
+            foreach (var part in parts)
+            {
+                Color color = BatteryWarningColor(part.Value) ?? label.ForeColor;
+                TextRenderer.DrawText(e.Graphics, part.Key, label.Font, new Point(x, 0), color, flags);
+                x += TextRenderer.MeasureText(e.Graphics, part.Key + "   .", label.Font, Size.Empty, flags).Width - mark;
+            }
         }
 
         private static string BudLevelText(int level)
