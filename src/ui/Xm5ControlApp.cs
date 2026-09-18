@@ -699,8 +699,11 @@ namespace Xm5ControlUi
             {
                 Text = TrayTitle(),
                 Icon = notificationIcon,
-                ContextMenuStrip = trayMenu,
                 Visible = true
+            };
+            trayIcon.MouseUp += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Right) ShowTrayMenu();
             };
             trayIcon.DoubleClick += (s, e) => ShowWindow();
             // Raised on a SystemEvents thread, so it is marshalled rather than
@@ -1849,6 +1852,41 @@ namespace Xm5ControlUi
                 PostToUi(QueueImmediateExit);
             });
             return menu;
+        }
+
+        // Not left to NotifyIcon.ContextMenuStrip. The app is DPI-unaware, and on
+        // a desktop whose monitors are scaled differently Windows converts the
+        // menu's position and size with the scale of the monitor the window is
+        // on, not the one the menu opens on. With the window on another monitor
+        // the menu landed far from the tray, or at 100% on a 175% display.
+        // Making a window at the pointer the active one first, and the menu's
+        // owner, gets the tray's monitor used instead. It is all but
+        // transparent, and goes when the menu does.
+        private void ShowTrayMenu()
+        {
+            if (trayMenu.Visible) return;
+            Point pointer = Cursor.Position;
+            var anchor = new Form
+            {
+                FormBorderStyle = FormBorderStyle.None,
+                ShowInTaskbar = false,
+                StartPosition = FormStartPosition.Manual,
+                Location = pointer,
+                Size = new Size(1, 1),
+                Opacity = 0.01,
+                TopMost = true
+            };
+            anchor.Show();
+            anchor.Activate();
+            ToolStripDropDownClosedEventHandler closed = null;
+            closed = (s, e) =>
+            {
+                trayMenu.Closed -= closed;
+                anchor.Close();
+                anchor.Dispose();
+            };
+            trayMenu.Closed += closed;
+            trayMenu.Show(anchor, Point.Empty, ToolStripDropDownDirection.AboveLeft);
         }
 
         private ToolStripMenuItem AddTrayAction(ToolStripItemCollection items, string text, Func<Task> action)
