@@ -287,9 +287,14 @@ namespace Xm5ControlUi
         private const int AutoDetectIntervalMs = 4000;
         private const int AutoStateRefreshIntervalMs = 15000;
         private const int LiveEqDebounceMs = 260;
-        private const int EqRowHeight = 33;
-        private const int EqBaselineRows = 3;
-        private const int EqExtraRowPadding = 12;
+        // The bands stand side by side, so the card is the same height for six
+        // of them as for ten; only their width is shared out. A taller window
+        // gives the faders the extra height, which is finer control.
+        private const int EqPresetRowTop = 78;
+        private const int EqBandTop = 124;
+        private const int EqBandLabelHeight = 22;
+        private const int EqFaderMinHeight = 150;
+        private const int EqCardBottomInset = 18;
         private const int BackendCommandPaceMs = 450;
         private const string StateBatchTail = "D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05\" --timeout 1800";
 
@@ -399,14 +404,10 @@ namespace Xm5ControlUi
         private SliderControl[] eqSliders;
         private Label[] eqValueLabels;
         private Label[] eqNameLabels;
-        private EqCurveControl eqCurve;
         private CardPanel eqCard;
         private PillButton eqFlatButton;
         private PillButton eqCopyPresetButton;
         private EqProfile eqProfile = EqProfile.Legacy6Band();
-        private int baseMinimumHeight;
-        private int eqAppliedExtraHeight;
-        private int eqPendingBandCount;
         private bool eqLayoutKnown;
         private PictureBox heroImageBox;
         private int currentEqPreset = 0xA0;
@@ -455,7 +456,6 @@ namespace Xm5ControlUi
             // The noise control card is a fixed-height row and the equalizer card
             // takes what is left, so these grew with the auto ambient sound row.
             MinimumSize = new Size(1180, 964);
-            baseMinimumHeight = MinimumSize.Height;
             Size = new Size(1380, 1044);
             if (startMinimizedToTray)
             {
@@ -494,7 +494,6 @@ namespace Xm5ControlUi
 
             Resize += (s, e) =>
             {
-                if (eqPendingBandCount > 0 && WindowState == FormWindowState.Normal) EnsureHeightForBands(eqPendingBandCount);
                 if (!IsClosing && hasShownOnce && WindowState == FormWindowState.Minimized && minimizeToTray)
                 {
                     ConcealMainWindow(removeFromTaskbar: true);
@@ -967,27 +966,13 @@ namespace Xm5ControlUi
             };
             parent.Controls.Add(eqCardSummaryLabel);
 
-            eqCurve = new EqCurveControl
-            {
-                BackColor = card,
-                ForeColor = ink,
-                LineColor = blue,
-                BassColor = blue,
-                GridColor = Color.FromArgb(76, 76, 76),
-                MutedColor = subdued,
-                Location = new Point(CardInset, 70),
-                Size = new Size(520, 112),
-                Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top
-            };
-            parent.Controls.Add(eqCurve);
-
             eqPresetBox = new ChoiceDropdown
             {
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 BackColor = cardSoft,
                 ForeColor = ink,
                 FlatStyle = FlatStyle.Flat,
-                Location = new Point(CardInset, 184),
+                Location = new Point(CardInset, EqPresetRowTop),
                 Width = 188
             };
             PopulateEqPresetBox();
@@ -1066,7 +1051,7 @@ namespace Xm5ControlUi
                     ForeColor = i == 0 && eqProfile.FirstBandIsClearBass ? blue : subdued,
                     Font = new Font("Segoe UI Semibold", 8.8f),
                     AutoEllipsis = true,
-                    TextAlign = ContentAlignment.MiddleLeft
+                    TextAlign = ContentAlignment.MiddleCenter
                 };
                 eqCard.Controls.Add(name);
                 eqNameLabels[i] = name;
@@ -1076,7 +1061,7 @@ namespace Xm5ControlUi
                     Text = eqProfile.FormatValue(eqProfile.Neutral),
                     ForeColor = ink,
                     Font = new Font("Segoe UI Semibold", 10f),
-                    TextAlign = ContentAlignment.MiddleRight
+                    TextAlign = ContentAlignment.MiddleCenter
                 };
                 eqCard.Controls.Add(value);
                 eqValueLabels[i] = value;
@@ -1094,16 +1079,15 @@ namespace Xm5ControlUi
                     FillColor = blue,
                     ThumbColor = blue,
                     TickColor = Color.FromArgb(91, 98, 108),
-                    CenteredFill = true
+                    CenteredFill = true,
+                    Vertical = true
                 };
                 slider.ValueChanged += (s, e) => HandleEqualizerSliderChanged((SliderControl)s);
                 eqCard.Controls.Add(slider);
                 eqSliders[i] = slider;
             }
 
-            if (eqCurve != null) eqCurve.SetProfile(eqProfile.Labels, eqProfile.MaxValue, eqProfile.FirstBandIsClearBass);
             UpdateEqControlsEnabled();
-            EnsureHeightForBands(count);
             LayoutEqualizer();
         }
 
@@ -1114,76 +1098,36 @@ namespace Xm5ControlUi
             control.Dispose();
         }
 
-        // Ten bands need five rows per column where six needed three. Raising the
-        // minimum alone is not enough: the default window is already taller than
-        // that, so the extra rows would still be clipped. Grow the window itself
-        // by the same delta, and track what has been applied so switching devices
-        // does not stack one allowance on top of another.
-        //
-        // Only while the window is Normal. Raising MinimumSize on a minimized
-        // window grows its 276x45 minimized bounds to the minimum, and WinForms
-        // then restores to that: starting in the tray came back at 1180 wide
-        // instead of 1380. The Resize handler applies it on restore instead.
-        private void EnsureHeightForBands(int bandCount)
-        {
-            if (baseMinimumHeight <= 0) return;
-            if (WindowState != FormWindowState.Normal)
-            {
-                eqPendingBandCount = bandCount;
-                return;
-            }
-            eqPendingBandCount = 0;
-            int rowsPerColumn = (bandCount + 1) / 2;
-            int extra = rowsPerColumn > EqBaselineRows
-                ? ((rowsPerColumn - EqBaselineRows) * EqRowHeight) + EqExtraRowPadding
-                : 0;
-            if (extra == eqAppliedExtraHeight) return;
-
-            int delta = extra - eqAppliedExtraHeight;
-            eqAppliedExtraHeight = extra;
-            MinimumSize = new Size(MinimumSize.Width, baseMinimumHeight + extra);
-            if (delta > 0 && WindowState == FormWindowState.Normal) Height += delta;
-        }
-
         private void LayoutEqualizer()
         {
             if (eqCard == null || eqSliders == null) return;
             if (eqFlatButton == null || eqCopyPresetButton == null || eqPresetBox == null) return;
 
             eqFlatButton.Size = new Size(74, 34);
-            eqFlatButton.Location = new Point(eqCard.Width - eqFlatButton.Width - CardInset, 184);
+            eqFlatButton.Location = new Point(eqCard.Width - eqFlatButton.Width - CardInset, EqPresetRowTop);
             eqCopyPresetButton.Size = new Size(98, 34);
-            eqCopyPresetButton.Location = new Point(eqFlatButton.Left - eqCopyPresetButton.Width - 10, 184);
+            eqCopyPresetButton.Location = new Point(eqFlatButton.Left - eqCopyPresetButton.Width - 10, EqPresetRowTop);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Width = Math.Max(260, eqCard.Width - (CardInset * 2));
-            if (eqCurve != null)
-            {
-                eqCurve.Width = Math.Max(360, eqCard.Width - (CardInset * 2));
-                eqCurve.Height = 112;
-            }
-            eqPresetBox.Location = new Point(CardInset, 184);
+            eqPresetBox.Location = new Point(CardInset, EqPresetRowTop);
             eqPresetBox.Width = Math.Max(150, Math.Min(220, eqCopyPresetButton.Left - CardInset - 12));
 
-            int top = 222;
-            int gap = 18;
-            int valueWidth = 34;
-            int rowsPerColumn = (eqSliders.Length + 1) / 2;
-            int availableWidth = Math.Max(420, eqCard.Width - (CardInset * 2) - gap);
-            int columnWidth = Math.Max(236, availableWidth / 2);
-            for (int i = 0; i < eqSliders.Length; i++)
+            // One column per band, value above the fader and name below it.
+            int count = eqSliders.Length;
+            if (count == 0) return;
+            int availableWidth = Math.Max(count * 48, eqCard.Width - (CardInset * 2));
+            int faderTop = EqBandTop + EqBandLabelHeight;
+            int faderHeight = Math.Max(EqFaderMinHeight, eqCard.Height - faderTop - EqBandLabelHeight - EqCardBottomInset);
+            for (int i = 0; i < count; i++)
             {
-                int column = i / rowsPerColumn;
-                int row = i % rowsPerColumn;
-                int x = CardInset + column * (columnWidth + gap);
-                int y = top + row * EqRowHeight;
-                int sliderLeft = x + 86;
-                int sliderWidth = Math.Max(120, columnWidth - 126);
+                int left = CardInset + (availableWidth * i / count);
+                int width = CardInset + (availableWidth * (i + 1) / count) - left;
 
-                eqNameLabels[i].Location = new Point(x, y + 4);
-                eqNameLabels[i].Size = new Size(82, 22);
-                eqSliders[i].Location = new Point(sliderLeft - 12, y - 1);
-                eqSliders[i].Size = new Size(sliderWidth + 24, 30);
-                eqValueLabels[i].Location = new Point(sliderLeft + sliderWidth + 6, y + 4);
-                eqValueLabels[i].Size = new Size(valueWidth, 22);
+                eqValueLabels[i].Location = new Point(left, EqBandTop);
+                eqValueLabels[i].Size = new Size(width, EqBandLabelHeight);
+                eqSliders[i].Location = new Point(left + (width - 32) / 2, faderTop);
+                eqSliders[i].Size = new Size(32, faderHeight);
+                eqNameLabels[i].Location = new Point(left, faderTop + faderHeight);
+                eqNameLabels[i].Size = new Size(width, EqBandLabelHeight);
             }
         }
 
@@ -2232,7 +2176,6 @@ namespace Xm5ControlUi
                     currentEqPreset = eqPreset;
                     SelectEqPresetSilently(eqPreset);
                     if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = eqProfile.PresetName(eqPreset);
-                    if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(eqPreset), null);
                 }
             }
             else
@@ -2387,7 +2330,6 @@ namespace Xm5ControlUi
             currentEqPreset = preset;
             string label = hasCachedValues ? FormatEqSummary(preset, cachedValues) : eqProfile.PresetName(preset);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = label;
-            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(preset), cachedValues);
             if (hasCachedValues) UpdateEqualizerUi(preset, cachedValues);
             lastActionLabel.Text = "Equalizer preset updating";
 
@@ -2450,7 +2392,6 @@ namespace Xm5ControlUi
             currentEqPreset = preset;
             SelectEqPresetSilently(preset);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
-            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(preset), values);
             lastActionLabel.Text = "Copied to " + presetName;
         }
 
@@ -2530,7 +2471,6 @@ namespace Xm5ControlUi
             currentEqPreset = preset;
             CacheEqValues(preset, values);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
-            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(preset), values);
             lastActionLabel.Text = quiet ? "Equalizer updating" : "Equalizer applied";
 
             string payload = FormatEqualizerPayload(preset, values);
@@ -2654,7 +2594,6 @@ namespace Xm5ControlUi
                 if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = eqProfile.PresetName(target) + " / Flat";
                 int[] flatValues = FlatEqValues();
                 CacheEqValues(target, flatValues);
-                if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(target), flatValues);
                 lastActionLabel.Text = "Equalizer flattened";
             }
             finally
@@ -2668,7 +2607,6 @@ namespace Xm5ControlUi
             currentEqPreset = preset;
             CacheEqValues(preset, values);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
-            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(preset), values);
             if (eqSliders == null || !HasEqValues(values)) return;
 
             updatingEqUi = true;
@@ -2742,7 +2680,6 @@ namespace Xm5ControlUi
             currentEqPreset = target;
             SelectEqPresetSilently(target);
             CacheEqValues(target, values);
-            if (eqCurve != null) eqCurve.SetState(eqProfile.PresetName(target), values);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(target, values);
             lastActionLabel.Text = "Equalizer updating";
             ScheduleLiveEqualizerApply();
@@ -4622,6 +4559,9 @@ namespace Xm5ControlUi
         public int SmallChange { get; set; }
         public int LargeChange { get; set; }
         public bool CenteredFill { get; set; }
+        // Minimum at the bottom and maximum at the top, the way a graphic
+        // equalizer's faders read.
+        public bool Vertical { get; set; }
         public Color TrackColor { get; set; }
         public Color FillColor { get; set; }
         public Color ThumbColor { get; set; }
@@ -4649,14 +4589,14 @@ namespace Xm5ControlUi
                 dragging = true;
                 Capture = true;
                 Focus();
-                SetValueFromX(e.X);
+                SetValueFromPointer(e.Location);
             }
             base.OnMouseDown(e);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            if (dragging) SetValueFromX(e.X);
+            if (dragging) SetValueFromPointer(e.Location);
             base.OnMouseMove(e);
         }
 
@@ -4669,12 +4609,12 @@ namespace Xm5ControlUi
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.Left)
+            if (e.KeyCode == Keys.Left || e.KeyCode == Keys.Down)
             {
                 Value -= Math.Max(1, SmallChange);
                 e.Handled = true;
             }
-            else if (e.KeyCode == Keys.Right)
+            else if (e.KeyCode == Keys.Right || e.KeyCode == Keys.Up)
             {
                 Value += Math.Max(1, SmallChange);
                 e.Handled = true;
@@ -4692,10 +4632,31 @@ namespace Xm5ControlUi
             base.OnKeyDown(e);
         }
 
+        // The arrow keys move focus between controls unless claimed here, and a
+        // vertical slider needs Up and Down as much as a horizontal one needs
+        // Left and Right.
+        protected override bool IsInputKey(Keys keyData)
+        {
+            switch (keyData & Keys.KeyCode)
+            {
+                case Keys.Left:
+                case Keys.Right:
+                case Keys.Up:
+                case Keys.Down:
+                    return true;
+            }
+            return base.IsInputKey(keyData);
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.Clear(Parent != null ? Parent.BackColor : BackColor);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            if (Vertical)
+            {
+                PaintVertical(e.Graphics);
+                return;
+            }
 
             Rectangle track = new Rectangle(12, Height / 2 - 3, Math.Max(8, Width - 24), 6);
             float ratio = maximum == minimum ? 0f : (Value - minimum) / (float)(maximum - minimum);
@@ -4737,11 +4698,54 @@ namespace Xm5ControlUi
             }
         }
 
-        private void SetValueFromX(int x)
+        private void PaintVertical(Graphics g)
         {
-            int left = 12;
-            int width = Math.Max(1, Width - 24);
-            float ratio = (Math.Max(left, Math.Min(left + width, x)) - left) / (float)width;
+            Rectangle track = new Rectangle(Width / 2 - 3, 12, 6, Math.Max(8, Height - 24));
+            float ratio = maximum == minimum ? 0f : (Value - minimum) / (float)(maximum - minimum);
+            int thumbY = track.Bottom - (int)Math.Round(track.Height * ratio);
+            int fillStart = CenteredFill ? track.Top + track.Height / 2 : track.Bottom;
+            int fillTop = Math.Min(fillStart, thumbY);
+            int fillBottom = Math.Max(fillStart, thumbY);
+
+            using (var trackBrush = new SolidBrush(Enabled ? TrackColor : Color.FromArgb(54, 58, 65)))
+            using (var fillBrush = new SolidBrush(Enabled ? FillColor : Color.FromArgb(85, 90, 98)))
+            using (var thumbBrush = new SolidBrush(Enabled ? ThumbColor : Color.FromArgb(95, 101, 110)))
+            using (var thumbPen = new Pen(Color.FromArgb(26, 28, 31), 2f))
+            {
+                FillRound(g, trackBrush, track, 3);
+                if (fillBottom > fillTop)
+                {
+                    FillRound(g, fillBrush, new Rectangle(track.Left, fillTop, track.Width, fillBottom - fillTop), 3);
+                }
+
+                if (TickFrequency > 0 && maximum > minimum)
+                {
+                    using (var tickPen = new Pen(TickColor, 1f))
+                    {
+                        for (int tick = minimum; tick <= maximum; tick += TickFrequency)
+                        {
+                            float tickRatio = (tick - minimum) / (float)(maximum - minimum);
+                            int y = track.Bottom - (int)Math.Round(track.Height * tickRatio);
+                            g.DrawLine(tickPen, track.Right + 6, y, track.Right + 9, y);
+                        }
+                    }
+                }
+
+                Rectangle thumb = new Rectangle(Width / 2 - 9, thumbY - 7, 18, 14);
+                FillRound(g, thumbBrush, thumb, 6);
+                using (var path = RoundedPath(thumb, 6))
+                {
+                    g.DrawPath(thumbPen, path);
+                }
+            }
+        }
+
+        private void SetValueFromPointer(Point point)
+        {
+            int start = 12;
+            int length = Math.Max(1, (Vertical ? Height : Width) - 24);
+            int position = Vertical ? start + length - (point.Y - start) : point.X;
+            float ratio = (Math.Max(start, Math.Min(start + length, position)) - start) / (float)length;
             Value = minimum + (int)Math.Round((maximum - minimum) * ratio);
         }
 
@@ -4856,137 +4860,6 @@ namespace Xm5ControlUi
                 rectangle.CloseFigure();
                 return rectangle;
             }
-            int d = radius * 2;
-            var path = new GraphicsPath();
-            path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90);
-            path.AddArc(bounds.Right - d, bounds.Top, d, d, 270, 90);
-            path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
-            path.AddArc(bounds.Left, bounds.Bottom - d, d, d, 90, 90);
-            path.CloseFigure();
-            return path;
-        }
-    }
-
-    internal sealed class EqCurveControl : Control
-    {
-        private string presetName = "Manual";
-        private string[] labels = { "400", "1k", "2.5k", "6.3k", "16k" };
-        private int maxValue = 20;
-        // The 6-band models plot only the five frequency bands: Clear Bass is a
-        // separate shelf and does not belong on the frequency curve.
-        private bool skipFirstBand = true;
-        private int[] values = { 10, 10, 10, 10, 10, 10 };
-
-        public Color LineColor { get; set; }
-        public Color BassColor { get; set; }
-        public Color GridColor { get; set; }
-        public Color MutedColor { get; set; }
-
-        public EqCurveControl()
-        {
-            DoubleBuffered = true;
-            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            LineColor = Color.FromArgb(16, 157, 245);
-            BassColor = Color.FromArgb(16, 157, 245);
-            GridColor = Color.FromArgb(76, 76, 76);
-            MutedColor = Color.FromArgb(169, 169, 169);
-            Font = new Font("Segoe UI", 8.6f);
-        }
-
-        public void SetProfile(string[] bandLabels, int bandMaxValue, bool firstBandIsClearBass)
-        {
-            maxValue = Math.Max(2, bandMaxValue);
-            skipFirstBand = firstBandIsClearBass;
-            int plotted = bandLabels == null ? 0 : Math.Max(0, bandLabels.Length - (skipFirstBand ? 1 : 0));
-            var next = new string[plotted];
-            for (int i = 0; i < plotted; i++) next[i] = bandLabels[i + (skipFirstBand ? 1 : 0)];
-            labels = next;
-            values = NormalizeValues(null, bandLabels == null ? 0 : bandLabels.Length);
-            Invalidate();
-        }
-
-        public void SetState(string preset, int[] bandValues)
-        {
-            presetName = preset;
-            values = NormalizeValues(bandValues, labels.Length + (skipFirstBand ? 1 : 0));
-            Invalidate();
-        }
-
-        private int[] NormalizeValues(int[] bandValues, int count)
-        {
-            int neutral = maxValue / 2;
-            var next = new int[count];
-            for (int i = 0; i < count; i++)
-            {
-                int value = bandValues != null && i < bandValues.Length ? bandValues[i] : neutral;
-                next[i] = Math.Max(0, Math.Min(maxValue, value));
-            }
-            return next;
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            e.Graphics.Clear(BackColor);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-
-            Rectangle plot = new Rectangle(58, 26, Math.Max(80, Width - 92), Math.Max(56, Height - 62));
-            int top = plot.Top;
-            int mid = plot.Top + plot.Height / 2;
-            int bottom = plot.Bottom;
-
-            using (var gridPen = new Pen(GridColor, 1f))
-            using (var zeroPen = new Pen(Color.FromArgb(135, 135, 135), 1.4f))
-            using (var textBrush = new SolidBrush(MutedColor))
-            using (var linePen = new Pen(LineColor, 2.8f))
-            using (var fillBrush = new SolidBrush(Color.FromArgb(36, LineColor)))
-            using (var pointBrush = new SolidBrush(LineColor))
-            {
-                e.Graphics.DrawLine(gridPen, plot.Left, top, plot.Right, top);
-                e.Graphics.DrawLine(zeroPen, plot.Left, mid, plot.Right, mid);
-                e.Graphics.DrawLine(gridPen, plot.Left, bottom, plot.Right, bottom);
-
-                int neutral = maxValue / 2;
-                TextRenderer.DrawText(e.Graphics, "+" + (maxValue - neutral), Font, new Rectangle(4, top - 8, 48, 18), MutedColor, TextFormatFlags.Right | TextFormatFlags.NoPadding);
-                TextRenderer.DrawText(e.Graphics, "0", Font, new Rectangle(4, mid - 8, 48, 18), MutedColor, TextFormatFlags.Right | TextFormatFlags.NoPadding);
-                TextRenderer.DrawText(e.Graphics, "-" + neutral, Font, new Rectangle(4, bottom - 18, 48, 18), MutedColor, TextFormatFlags.Right | TextFormatFlags.NoPadding);
-
-                int offset = skipFirstBand ? 1 : 0;
-                PointF[] points = new PointF[labels.Length];
-                // Ten labels in the width that held five: drop every other one
-                // rather than let them overlap into an unreadable smear.
-                int labelStep = labels.Length > 6 ? 2 : 1;
-                for (int i = 0; i < points.Length; i++)
-                {
-                    float x = points.Length == 1 ? plot.Left : plot.Left + (plot.Width * i / (float)(points.Length - 1));
-                    int value = i + offset < values.Length ? values[i + offset] : neutral;
-                    float y = bottom - (plot.Height * value / (float)maxValue);
-                    points[i] = new PointF(x, y);
-                    e.Graphics.FillEllipse(pointBrush, x - 4, y - 4, 8, 8);
-                    if (i % labelStep == 0)
-                    {
-                        TextRenderer.DrawText(e.Graphics, labels[i], Font, new Rectangle((int)x - 28, bottom + 2, 56, 18), MutedColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding);
-                    }
-                }
-
-                if (points.Length > 1)
-                {
-                    using (var fillPath = new GraphicsPath())
-                    {
-                        fillPath.AddLines(points);
-                        fillPath.AddLine(points[points.Length - 1].X, mid, points[0].X, mid);
-                        fillPath.CloseFigure();
-                        e.Graphics.FillPath(fillBrush, fillPath);
-                    }
-                    e.Graphics.DrawLines(linePen, points);
-                }
-
-                TextRenderer.DrawText(e.Graphics, presetName, new Font("Segoe UI Semibold", 9f), new Rectangle(plot.Left, 2, plot.Width, 22), ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            }
-        }
-
-        private static GraphicsPath RoundedPath(Rectangle bounds, int radius)
-        {
             int d = radius * 2;
             var path = new GraphicsPath();
             path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90);
