@@ -287,6 +287,20 @@ namespace Xm5ControlUi
         private const int AutoDetectIntervalMs = 4000;
         private const int AutoStateRefreshIntervalMs = 15000;
         private const int LiveEqDebounceMs = 260;
+        // Window layout. Each left-hand row holds a card plus its margin on
+        // both sides; the equalizer row takes whatever height is left.
+        private const int RootPadding = 22;
+        private const int HeaderRowHeight = 72;
+        private const int CardMargin = 7;
+        private const int HeroRowHeight = 194;
+        private const int NoiseControlRowHeight = 344;
+        // Where the settings card is wide enough for the Connection quality
+        // caption beside its three buttons; any narrower and they overlap.
+        private const int ContentMinimumWidth = 1260;
+        // The keyboard shortcuts row sits at the foot of the settings card, but
+        // never higher than just below the last setting.
+        private const int ShortcutsRowMinimumTop = 730;
+        private const int ShortcutsRowAllowance = 92;
         // The bands stand side by side, so the card is the same height for six
         // of them as for ten; only their width is shared out. A taller window
         // gives the faders the extra height, which is finer control.
@@ -428,6 +442,9 @@ namespace Xm5ControlUi
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+        private static extern int SetWindowTheme(IntPtr hwnd, string subAppName, string subIdList);
+
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
@@ -452,11 +469,16 @@ namespace Xm5ControlUi
             LoadAppPreferences();
 
             Text = AppTitle();
-            StartPosition = FormStartPosition.CenterScreen;
-            // The noise control card is a fixed-height row and the equalizer card
-            // takes what is left, so these grew with the auto ambient sound row.
-            MinimumSize = new Size(1180, 964);
-            Size = new Size(1380, 1044);
+            // The layout has a smallest size below which cards would overlap, but
+            // the window is not held to it: past that point the content scrolls
+            // instead, so every control stays reachable in a small window or on
+            // a small screen. The window opens at that size or the screen's,
+            // whichever is smaller.
+            MinimumSize = new Size(480, 360);
+            AutoScroll = true;
+            AutoScrollMinSize = new Size(ContentMinimumWidth, ContentMinimumHeight);
+            ClientSize = new Size(1364, ContentMinimumHeight);
+            PlaceOnScreen();
             if (startMinimizedToTray)
             {
                 WindowState = FormWindowState.Minimized;
@@ -608,16 +630,21 @@ namespace Xm5ControlUi
             var root = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(22),
+                Padding = new Padding(RootPadding),
                 BackColor = page,
                 ColumnCount = 2,
                 RowCount = 2
             };
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, HeaderRowHeight));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Controls.Add(root);
+            // Scrolling moves what is already on screen rather than redrawing
+            // it, and on a display Windows is scaling for this DPI-unaware app
+            // the moved image lands a pixel off, leaving seams and clipped
+            // letters behind. Redraw the lot instead.
+            root.Move += (s, e) => root.Invalidate(true);
 
             var header = new Panel { Dock = DockStyle.Fill, BackColor = page };
             root.SetColumnSpan(header, 2);
@@ -670,8 +697,8 @@ namespace Xm5ControlUi
                 ColumnCount = 1,
                 Margin = new Padding(0, 0, 8, 0)
             };
-            left.RowStyles.Add(new RowStyle(SizeType.Absolute, 194));
-            left.RowStyles.Add(new RowStyle(SizeType.Absolute, 344));
+            left.RowStyles.Add(new RowStyle(SizeType.Absolute, HeroRowHeight));
+            left.RowStyles.Add(new RowStyle(SizeType.Absolute, NoiseControlRowHeight));
             left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             root.Controls.Add(left, 0, 1);
 
@@ -1131,6 +1158,40 @@ namespace Xm5ControlUi
             }
         }
 
+        // The smallest client area that shows both columns without clipping;
+        // below it the window scrolls.
+        private static int ContentMinimumHeight
+        {
+            get
+            {
+                int left = HeroRowHeight + NoiseControlRowHeight + EqualizerCardMinimumHeight + (CardMargin * 2);
+                int right = ShortcutsRowMinimumTop + ShortcutsRowAllowance + (CardMargin * 2);
+                return (RootPadding * 2) + HeaderRowHeight + Math.Max(left, right);
+            }
+        }
+
+        // Centred on the screen the pointer is on, and shrunk to its working
+        // area first if need be, so a small screen never has the title bar or
+        // the bottom edge out of reach.
+        private void PlaceOnScreen()
+        {
+            StartPosition = FormStartPosition.Manual;
+            Rectangle area = Screen.FromPoint(Cursor.Position).WorkingArea;
+            int width = Math.Min(Width, area.Width);
+            int height = Math.Min(Height, area.Height);
+            Bounds = new Rectangle(
+                area.Left + (area.Width - width) / 2,
+                area.Top + (area.Height - height) / 2,
+                width,
+                height);
+        }
+
+        // The smallest card that shows every band's fader at its minimum height.
+        private static int EqualizerCardMinimumHeight
+        {
+            get { return EqBandTop + EqBandLabelHeight + EqFaderMinHeight + EqBandLabelHeight + EqCardBottomInset; }
+        }
+
         private void BuildSettingsHub(CardPanel parent)
         {
             AddTitle(parent, "Settings", 24);
@@ -1247,7 +1308,7 @@ namespace Xm5ControlUi
         private void LayoutShortcutsRow(Control parent)
         {
             if (parent == null) return;
-            int dividerTop = Math.Max(730, parent.Height - 126);
+            int dividerTop = Math.Max(ShortcutsRowMinimumTop, parent.Height - ShortcutsRowAllowance);
             if (shortcutsDivider != null && !shortcutsDivider.IsDisposed)
             {
                 shortcutsDivider.Location = new Point(CardInset, dividerTop);
@@ -3239,6 +3300,9 @@ namespace Xm5ControlUi
                 DwmSetWindowAttribute(Handle, 35, ref caption, sizeof(int));
                 DwmSetWindowAttribute(Handle, 36, ref captionText, sizeof(int));
                 DwmSetWindowAttribute(Handle, 34, ref border, sizeof(int));
+
+                // The scrollbars a small window shows, dark to match the rest.
+                SetWindowTheme(Handle, "DarkMode_Explorer", null);
             }
             catch
             {
@@ -3374,7 +3438,7 @@ namespace Xm5ControlUi
             return new CardPanel
             {
                 Dock = DockStyle.Fill,
-                Margin = new Padding(7),
+                Margin = new Padding(CardMargin),
                 Radius = 8,
                 BackColor = card,
                 BorderColor = line
