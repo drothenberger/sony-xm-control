@@ -284,6 +284,7 @@ namespace Xm5ControlUi
 
         private const int CardInset = 36;
         private const int HeroModeOpticalOffset = 0;
+        private const int HeroLastActionTop = 100;
         private const int AutoDetectIntervalMs = 4000;
         private const int AutoStateRefreshIntervalMs = 15000;
         private const int LiveEqDebounceMs = 260;
@@ -292,7 +293,7 @@ namespace Xm5ControlUi
         private const int RootPadding = 22;
         private const int HeaderRowHeight = 72;
         private const int CardMargin = 7;
-        private const int HeroRowHeight = 194;
+        private const int HeroRowHeight = 152;
         private const int NoiseControlRowHeight = 344;
         // Where the settings card is wide enough for the Connection quality
         // caption beside its three buttons; any narrower and they overlap.
@@ -731,15 +732,17 @@ namespace Xm5ControlUi
 
         private void BuildHero(CardPanel parent)
         {
-            AddEyebrow(parent, "Current mode", 18);
+            // No "Current mode" caption above the mode: the mode names say what
+            // they are, and the card is kept short so the window fits on a
+            // 1080p screen.
             bigModeLabel = new Label
             {
                 Text = "Unknown",
                 ForeColor = ink,
                 Font = new Font("Segoe UI Semibold", 29f),
                 AutoSize = false,
-                Location = new Point(CardInset - HeroModeOpticalOffset, 42),
-                Size = new Size(420, 66),
+                Location = new Point(CardInset - HeroModeOpticalOffset, 10),
+                Size = new Size(420, 60),
                 AutoEllipsis = true,
                 UseCompatibleTextRendering = false
             };
@@ -751,7 +754,7 @@ namespace Xm5ControlUi
                 ForeColor = subdued,
                 Font = new Font("Segoe UI", 10.5f),
                 AutoSize = false,
-                Location = new Point(CardInset, 112),
+                Location = new Point(CardInset, 70),
                 Size = new Size(520, 28),
                 AutoEllipsis = true
             };
@@ -765,7 +768,7 @@ namespace Xm5ControlUi
                 AutoSize = false,
                 Size = new Size(520, 28),
                 Anchor = AnchorStyles.Left | AnchorStyles.Top,
-                Location = new Point(CardInset, 142),
+                Location = new Point(CardInset, HeroLastActionTop),
                 AutoEllipsis = true
             };
             lastActionLabel.Height = 22;
@@ -788,7 +791,7 @@ namespace Xm5ControlUi
                 heroImageBox.Visible = showImage;
                 if (showImage)
                 {
-                    int imageSize = Math.Min(160, Math.Max(124, parent.Height - 28));
+                    int imageSize = Math.Min(160, Math.Max(96, parent.Height - 20));
                     heroImageBox.Size = new Size(imageSize, imageSize);
                     heroImageBox.Location = new Point(parent.Width - heroImageBox.Width - CardInset, Math.Max(10, (parent.Height - heroImageBox.Height) / 2));
                 }
@@ -798,7 +801,7 @@ namespace Xm5ControlUi
                 bigModeLabel.Width = textWidth;
                 bigDetailLabel.Width = textWidth;
                 lastActionLabel.Width = textWidth;
-                lastActionLabel.Location = new Point(CardInset, 142);
+                lastActionLabel.Location = new Point(CardInset, HeroLastActionTop);
             };
             parent.Resize += (s, e) => layoutHero();
             layoutHero();
