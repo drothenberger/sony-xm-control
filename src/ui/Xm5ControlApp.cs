@@ -272,6 +272,9 @@ namespace Xm5ControlUi
         private readonly Color line = Color.FromArgb(58, 58, 58);
         private readonly Color ink = Color.FromArgb(245, 245, 245);
         private readonly Color subdued = Color.FromArgb(169, 169, 169);
+        // A value row's text once it is no longer being refreshed. Darker than
+        // subdued, the colour such text normally has, rather than a new hue.
+        private readonly Color faint = Color.FromArgb(112, 112, 112);
         private readonly Color blue = Color.FromArgb(0x10, 0x9d, 0xf5);
         private readonly Color bluePressed = Color.FromArgb(0x0c, 0x86, 0xd4);
         private readonly Color green = Color.FromArgb(0, 166, 125);
@@ -347,6 +350,9 @@ namespace Xm5ControlUi
         private Label dseeLabel;
         private Label connectionQualityLabel;
         private Label codecLabel;
+        // Whether the codec shown came from the headset, as opposed to the
+        // row's "Waiting" or a note that it is not being reported.
+        private bool codecReported;
         private PillButton lowLatencyButton;
         private bool lowLatencyActive;
         private const string LowLatencyHint = "Use Sound Connect to turn Low Latency on and off.";
@@ -2046,12 +2052,28 @@ namespace Xm5ControlUi
         {
             if (codecLabel == null) return;
             var match = Regex.Match(output, @"(?m)^codec:\s*(.+?)\s*$", RegexOptions.IgnoreCase);
-            if (!match.Success) return;
+            if (match.Success)
+            {
+                string value = match.Groups[1].Value;
+                // The headset reports the codec of whichever connection is playing,
+                // so on a multipoint setup this follows the active device.
+                codecLabel.Text = value.Equals("unknown", StringComparison.OrdinalIgnoreCase) ? "Unknown" : value;
+                codecLabel.ForeColor = subdued;
+                codecReported = true;
+                return;
+            }
 
-            string value = match.Groups[1].Value;
-            // The headset reports the codec of whichever connection is playing,
-            // so on a multipoint setup this follows the active device.
-            codecLabel.Text = value.Equals("unknown", StringComparison.OrdinalIgnoreCase) ? "Unknown" : value;
+            // The WF-1000XM6 leaves the device information request unanswered
+            // for as long as either bud sits in the case (verified with each
+            // bud, in both connection quality settings), while still answering
+            // the battery request in the same batch with that bud at 0%. Any
+            // other missing reply is left to look like one.
+            if (!Regex.IsMatch(output, @"(?m)^battery:\s*left\s*(0%|.*right\s*0%)", RegexOptions.IgnoreCase)) return;
+            // Dimmed, as the meter is, for a value no longer being refreshed:
+            // the source can still change while the bud is docked. With nothing
+            // reported yet, say why rather than go on "Waiting".
+            if (codecReported) codecLabel.ForeColor = faint;
+            else codecLabel.Text = "Not reported while a bud is docked";
         }
 
         private void ParseBattery(string output)
