@@ -95,6 +95,16 @@ namespace Xm5ControlUi
             get { return NameFilter.StartsWith("WF", StringComparison.OrdinalIgnoreCase); }
         }
 
+        /// <summary>
+        /// False for the WF-1000XM6. It answers the touch sensor panel inquiry,
+        /// but Sound Connect has no such setting for it, and changing it leaves
+        /// the touch controls working either way.
+        /// </summary>
+        public bool HasTouchPanelSetting
+        {
+            get { return !string.Equals(NameFilter, "WF-1000XM6", StringComparison.OrdinalIgnoreCase); }
+        }
+
         public DeviceProfile(string displayName, string nameFilter, string assetPath, params string[] aliases)
         {
             DisplayName = displayName;
@@ -584,6 +594,8 @@ namespace Xm5ControlUi
         private PillButton pauseOffButton;
         private PillButton touchOnButton;
         private PillButton touchOffButton;
+        private ToolStripMenuItem touchOnTrayItem;
+        private ToolStripMenuItem touchOffTrayItem;
         private PillButton autoPowerRemovedButton;
         private PillButton autoPowerDisableButton;
         private PillButton configureShortcutsButton;
@@ -1738,8 +1750,30 @@ namespace Xm5ControlUi
             SetOptionPair(pauseOnButton, pauseOffButton, enabled, blue, blue);
         }
 
+        private bool TouchPanelSupported
+        {
+            get { return currentProfile == null || currentProfile.HasTouchPanelSetting; }
+        }
+
+        // The row keeps its place so the card does not reflow between models;
+        // only its buttons and the tray items go.
+        private void ApplyTouchPanelSupport()
+        {
+            bool supported = TouchPanelSupported;
+            if (touchOnButton != null) touchOnButton.Visible = supported;
+            if (touchOffButton != null) touchOffButton.Visible = supported;
+            if (touchOnTrayItem != null) touchOnTrayItem.Available = supported;
+            if (touchOffTrayItem != null) touchOffTrayItem.Available = supported;
+            SetTouchPanelState(null);
+        }
+
         private void SetTouchPanelState(bool? enabled)
         {
+            if (!TouchPanelSupported)
+            {
+                if (touchPanelLabel != null) touchPanelLabel.Text = "Not available on this model";
+                return;
+            }
             if (touchPanelLabel != null) touchPanelLabel.Text = enabled.HasValue ? (enabled.Value ? "On" : "Off") : "Waiting";
             SetOptionPair(touchOnButton, touchOffButton, enabled, blue, blue);
         }
@@ -1830,8 +1864,8 @@ namespace Xm5ControlUi
             AddTrayAction(menu.Items, "Speak-to-Chat: Off", () => SetSpeakToChatAsync(false));
             AddTrayAction(menu.Items, "Pause when headphones are removed: On", () => SetWearPauseAsync(true));
             AddTrayAction(menu.Items, "Pause when headphones are removed: Off", () => SetWearPauseAsync(false));
-            AddTrayAction(menu.Items, "Touch sensor control panel: On", () => SetTouchPanelAsync(true));
-            AddTrayAction(menu.Items, "Touch sensor control panel: Off", () => SetTouchPanelAsync(false));
+            touchOnTrayItem = AddTrayAction(menu.Items, "Touch sensor control panel: On", () => SetTouchPanelAsync(true));
+            touchOffTrayItem = AddTrayAction(menu.Items, "Touch sensor control panel: Off", () => SetTouchPanelAsync(false));
             AddTrayAction(menu.Items, "Automatic power off: On", SetAutoPowerRemovedAsync);
             AddTrayAction(menu.Items, "Automatic power off: Off", SetAutoPowerDisabledAsync);
             menu.Items.Add(new ToolStripSeparator());
@@ -2569,6 +2603,7 @@ namespace Xm5ControlUi
 
             Text = AppTitle();
             if (titleLabel != null) titleLabel.Text = currentProfile.DisplayName;
+            if (changed) ApplyTouchPanelSupport();
             ApplyTrayTooltip();
             if (heroImageBox != null && !heroImageBox.IsDisposed && (changed || heroImageBox.Image == null))
             {
@@ -4249,6 +4284,12 @@ namespace Xm5ControlUi
 
         private async Task SetTouchPanelAsync(bool enabled)
         {
+            // Still reachable from a keyboard shortcut bound on another model.
+            if (!TouchPanelSupported)
+            {
+                lastActionLabel.Text = "Touch panel not available on " + currentProfile.DisplayName;
+                return;
+            }
             SetTouchPanelState(enabled);
             lastActionLabel.Text = "Touch panel " + (enabled ? "on" : "off");
             await RunSettingWriteAsync(WithDevice("raw \"D8 D1 00 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting touch panel");
