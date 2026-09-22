@@ -474,6 +474,15 @@ namespace Xm5ControlUi
         private int? batteryLeftLevel;
         private int? batteryRightLevel;
         private int? batteryCaseLevel;
+        // Each bud as last read, 0 when docked, or null before any reading
+        // that named the buds; and the last level each had out of the case,
+        // kept through docking. Docking the second bud ends the connection,
+        // so the last reading is often one with a single bud docked, and
+        // once the headset is gone its in-ear level is the better answer.
+        private int? batteryLeftRead;
+        private int? batteryRightRead;
+        private int? batteryLeftInEar;
+        private int? batteryRightInEar;
         private Color trayIconColorDrawn;
         private bool autoDetectRunning;
         // Whether the last scan found the headset connected. Distinct from
@@ -481,6 +490,9 @@ namespace Xm5ControlUi
         // got through: the scan is a local enumeration costing 64 ms and no
         // control channel, and it runs whether or not the window is visible.
         private bool lastScanConnected;
+        // Whether any scan has answered yet, so that lastScanConnected being
+        // false can be told apart from not knowing.
+        private bool scanAnswered;
         private bool lastStateRefreshConnected;
         private bool immediateExitQueued;
         private DateTime lastBackendCommandAtUtc = DateTime.MinValue;
@@ -1743,6 +1755,13 @@ namespace Xm5ControlUi
             {
                 title += " - paused";
             }
+            else if (scanAnswered && !lastScanConnected)
+            {
+                // Before the meter's state, which is only its last word: the
+                // stream has stopped, and "nothing playing (not updating)"
+                // would say so at a length that leaves no room for the battery.
+                title += " - disconnected";
+            }
             else if (trayMeterEnabled && controlInUse)
             {
                 // Said instead of a reading: any number left on the icon is
@@ -1774,16 +1793,23 @@ namespace Xm5ControlUi
             if (battery != null)
             {
                 TimeSpan age = DateTime.UtcNow - batteryReadAt;
-                string suffix = age >= TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes)
-                    ? " (" + FormatAge(age) + " ago)"
-                    : "";
+                string suffix = BatteryAgeShown(age) ? " (" + FormatAge(age) + " ago)" : "";
                 // 63 characters is the Shell_NotifyIcon limit for a tooltip.
-                // When the full line does not fit, the case level goes before
-                // the age does: an old reading without its age would pass for
-                // a current one.
-                string line = title + "\n" + battery + suffix;
-                if (line.Length > 63) line = title + "\n" + batteryLevelsText.Replace("   ", " · ") + suffix;
-                if (line.Length <= 63) title = line;
+                // When the full line does not fit, what the title adds to the
+                // app's name goes first, then the case level, and the age
+                // never does: an old reading without its age would pass for a
+                // current one.
+                string buds = BatteryLevelsShown().Replace("   ", " · ");
+                foreach (string line in new[]
+                {
+                    title + "\n" + battery + suffix,
+                    AppTitle() + "\n" + battery + suffix,
+                    title + "\n" + buds + suffix,
+                    AppTitle() + "\n" + buds + suffix,
+                })
+                {
+                    if (line.Length <= 63) { title = line; break; }
+                }
             }
             return title.Length <= 63 ? title : title.Substring(0, 63);
         }
@@ -2293,6 +2319,10 @@ namespace Xm5ControlUi
                 batteryLeftLevel = null;
                 batteryRightLevel = null;
                 batteryCaseLevel = null;
+                batteryLeftRead = null;
+                batteryRightRead = null;
+                batteryLeftInEar = null;
+                batteryRightInEar = null;
             }
             if (IsClosing) return changed;
 
@@ -2366,6 +2396,7 @@ namespace Xm5ControlUi
             if (output == null) return DetectAttempt.NotScanned;
 
             var detection = FindDetectedProfile(output);
+            scanAnswered = true;
             if (detection == null)
             {
                 lastScanConnected = false;
@@ -2855,8 +2886,7 @@ namespace Xm5ControlUi
         // shared by the tray digits and the window's row so the two agree.
         private Color? BatteryWarningColor(int? level)
         {
-            if (!level.HasValue ||
-                DateTime.UtcNow - batteryReadAt >= TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes)) return null;
+            if (!level.HasValue || BatteryAgeShown(DateTime.UtcNow - batteryReadAt)) return null;
             if (level.Value < BatteryCriticalPercent) return TrayBatteryCriticalColor;
             if (level.Value < BatteryLowPercent) return TrayBatteryLowColor;
             return null;
@@ -2979,6 +3009,10 @@ namespace Xm5ControlUi
                 // "Case" level that follows.
                 int left = int.Parse(buds.Groups[1].Value);
                 int right = int.Parse(buds.Groups[2].Value);
+                batteryLeftRead = left;
+                batteryRightRead = right;
+                if (left != 0) batteryLeftInEar = left;
+                if (right != 0) batteryRightInEar = right;
                 batteryLevelsText = "L " + BudLevelText(left) + "   R " + BudLevelText(right);
                 batteryLeftLevel = left == 0 ? (int?)null : left;
                 batteryRightLevel = right == 0 ? (int?)null : right;
@@ -2991,6 +3025,8 @@ namespace Xm5ControlUi
                 // Once a model reports its buds separately, a single level is a
                 // coarser answer to the same question and does not replace them.
                 batteryLevelsText = FormatBatteryText(single.Groups[1].Value);
+                batteryLeftRead = null;
+                batteryRightRead = null;
                 batteryCaseText = null;
                 batteryCaseLevel = null;
                 batteryListeningLevel = int.Parse(Regex.Match(single.Groups[1].Value, @"\d+").Value);
@@ -3023,10 +3059,11 @@ namespace Xm5ControlUi
         private void PaintBatteryRow(object sender, PaintEventArgs e)
         {
             var label = (Label)sender;
-            if (batteryLevelsText == null) return;
+            string shown = BatteryLevelsShown();
+            if (shown == null) return;
 
             var parts = new List<KeyValuePair<string, int?>>();
-            string[] levels = batteryLevelsText.Split(new[] { "   " }, StringSplitOptions.None);
+            string[] levels = shown.Split(new[] { "   " }, StringSplitOptions.None);
             if (levels.Length == 2)
             {
                 parts.Add(new KeyValuePair<string, int?>(levels[0], batteryLeftLevel));
@@ -3034,13 +3071,13 @@ namespace Xm5ControlUi
             }
             else
             {
-                parts.Add(new KeyValuePair<string, int?>(batteryLevelsText, batteryListeningLevel));
+                parts.Add(new KeyValuePair<string, int?>(shown, batteryListeningLevel));
             }
             if (batteryCaseText != null) parts.Add(new KeyValuePair<string, int?>(batteryCaseText, batteryCaseLevel));
             // An old reading says how old, as the tooltip does, since it has
             // also lost any warning colour and would otherwise pass for fresh.
             TimeSpan age = DateTime.UtcNow - batteryReadAt;
-            if (age >= TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes))
+            if (BatteryAgeShown(age))
             {
                 parts.Add(new KeyValuePair<string, int?>("(" + FormatAge(age) + " ago)", null));
             }
@@ -3065,10 +3102,32 @@ namespace Xm5ControlUi
             return level == 0 ? "docked" : level + "%";
         }
 
+        // The levels as shown. While the headset is connected a docked bud
+        // says so. Once it is gone, a docked bud shows the level it last had
+        // out of the case instead: the reading that remains was most likely
+        // taken before the other bud was docked too, and "L docked R 64%"
+        // would then describe neither what happened nor anything useful.
+        private string BatteryLevelsShown()
+        {
+            if (lastScanConnected || !batteryLeftRead.HasValue || !batteryRightRead.HasValue) return batteryLevelsText;
+            int left = batteryLeftRead.Value == 0 ? batteryLeftInEar ?? 0 : batteryLeftRead.Value;
+            int right = batteryRightRead.Value == 0 ? batteryRightInEar ?? 0 : batteryRightRead.Value;
+            return "L " + BudLevelText(left) + "   R " + BudLevelText(right);
+        }
+
+        // Whether a reading carries its age, and has lost any warning colour.
+        // At once when the headset is gone, even at "0 min": nothing will
+        // refresh it, and a bud in the case is charging past its level.
+        private bool BatteryAgeShown(TimeSpan age)
+        {
+            return !lastScanConnected || age >= TimeSpan.FromMinutes(BatteryAgeShownAfterMinutes);
+        }
+
         private string BatteryText(string gap)
         {
-            if (batteryLevelsText == null) return null;
-            string text = batteryLevelsText.Replace("   ", gap);
+            string levels = BatteryLevelsShown();
+            if (levels == null) return null;
+            string text = levels.Replace("   ", gap);
             return batteryCaseText == null ? text : text + gap + batteryCaseText;
         }
 
