@@ -339,15 +339,15 @@ namespace Xm5ControlUi
         // with one frozen level marked valid, so the readings alone cannot show
         // it. Often enough that switching it back on shows within a few seconds.
         private const int MeterStreamSafeListeningEvery = 5;
-        // Below these the tray digits turn yellow, then red. Judged on the lower
-        // earbud, not the case: a flat case does not cut listening short.
+        // At or below these the tray digits turn yellow, then red. Judged on the
+        // lower earbud, not the case: a flat case does not cut listening short.
         // Yellow rather than amber because amber and red differ mostly in hue,
         // which red/green colour blindness hides; yellow is far brighter than
         // red, and a difference in lightness survives.
         // Red matches where the WF-1000XM6's Auto Power Save starts switching
-        // features off (below 20%, per Sony), and yellow comes early enough to
-        // warn before that - the same 30% at which the case light starts
-        // flashing orange for a low earbud.
+        // features off (the earbuds announce it at 20%), and yellow comes early
+        // enough to warn before that - the same 30% at which the case light
+        // starts flashing orange for a low earbud.
         private const int BatteryLowPercent = 30;
         private const int BatteryCriticalPercent = 20;
         private const int MeterSupervisorIntervalMs = 1000;
@@ -2887,8 +2887,8 @@ namespace Xm5ControlUi
         private Color? BatteryWarningColor(int? level)
         {
             if (!level.HasValue || BatteryAgeShown(DateTime.UtcNow - batteryReadAt)) return null;
-            if (level.Value < BatteryCriticalPercent) return TrayBatteryCriticalColor;
-            if (level.Value < BatteryLowPercent) return TrayBatteryLowColor;
+            if (level.Value <= BatteryCriticalPercent) return TrayBatteryCriticalColor;
+            if (level.Value <= BatteryLowPercent) return TrayBatteryLowColor;
             return null;
         }
 
