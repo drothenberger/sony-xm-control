@@ -416,7 +416,10 @@ namespace Xm5ControlUi
             string ncasm = ncasmTypeSeen == 0x19 ? "66 19;"
                 : ncasmTypeSeen == 0x17 ? "66 17;"
                 : "66 19;66 17;";
-            return "batch \"" + battery + "12 00;" + ncasm + StateBatchTail;
+            // F0 06 asks whether the headset has the ear tip seal test. Only
+            // until that is settled, for the same reason as the NCASM pair.
+            string sealTest = sealTestSupported.HasValue ? "" : "F0 06;";
+            return "batch \"" + battery + "12 00;" + ncasm + sealTest + StateBatchTail;
         }
 
         // The battery queries worth asking on the meter stream. Earbuds skip the
@@ -596,6 +599,18 @@ namespace Xm5ControlUi
         private PillButton touchOffButton;
         private ToolStripMenuItem touchOnTrayItem;
         private ToolStripMenuItem touchOffTrayItem;
+        private Label touchPanelCaptionLabel;
+        private bool? touchPanelEnabled;
+        private Label sealTestCaptionLabel;
+        private Label sealTestLabel;
+        private PillButton sealTestButton;
+        private ToolStripMenuItem sealTestTrayItem;
+        // Null until the headset has said whether it has the test.
+        private bool? sealTestSupported;
+        private int sealTestMisses;
+        private bool sealTestRunning;
+        private bool sealTestNoticeShowing;
+        private string sealTestResultText;
         private PillButton autoPowerRemovedButton;
         private PillButton autoPowerDisableButton;
         private PillButton configureShortcutsButton;
@@ -730,6 +745,16 @@ namespace Xm5ControlUi
                 if (e.Button == MouseButtons.Right) ShowTrayMenu();
             };
             trayIcon.DoubleClick += (s, e) => ShowWindow();
+            // A balloon cannot carry a button, so the seal check's result is
+            // itself the way to run the check again. No other notification
+            // does anything when clicked.
+            trayIcon.BalloonTipClicked += async (s, e) =>
+            {
+                if (!sealTestNoticeShowing) return;
+                sealTestNoticeShowing = false;
+                await RunUiTaskAsync(CheckSealAsync);
+            };
+            trayIcon.BalloonTipClosed += (s, e) => sealTestNoticeShowing = false;
             // Raised on a SystemEvents thread, so it is marshalled rather than
             // touched directly; PostToUi drops it if the handle has gone.
             sessionSwitchHandler = (s, e) =>
@@ -1595,9 +1620,16 @@ namespace Xm5ControlUi
 
             touchOnButton = NewOptionButton("On");
             touchOffButton = NewOptionButton("Off");
-            touchPanelLabel = AddActionRow(parent, "Touch sensor control panel", "Waiting", 562, touchOnButton, touchOffButton);
+            touchPanelLabel = AddActionRow(parent, "Touch sensor control panel", "Waiting", 562, out touchPanelCaptionLabel, touchOnButton, touchOffButton);
             touchOnButton.Click += async (s, e) => await SetTouchPanelAsync(true);
             touchOffButton.Click += async (s, e) => await SetTouchPanelAsync(false);
+
+            // The ear tip seal check takes the same place on a model without
+            // the touch panel setting: the card has no height to spare for a
+            // row of its own. ApplyTouchPanelSupport shows one or the other.
+            sealTestButton = NewOptionButton("Check");
+            sealTestLabel = AddActionRow(parent, "Ear tip seal", "Waiting", 562, out sealTestCaptionLabel, sealTestButton);
+            sealTestButton.Click += async (s, e) => await CheckSealAsync();
 
             AddDivider(parent, 618);
             AddEyebrow(parent, "Power", 640);
@@ -1643,7 +1675,7 @@ namespace Xm5ControlUi
             SetDseeState(null);
             SetSpeakToChatState(null);
             SetWearPauseState(null);
-            SetTouchPanelState(null);
+            ApplyTouchPanelSupport();
             SetAutoPowerState(null);
         }
 
@@ -1756,26 +1788,57 @@ namespace Xm5ControlUi
         }
 
         // The row keeps its place so the card does not reflow between models;
-        // only its buttons and the tray items go.
+        // only its buttons and the tray items go. A model without the setting
+        // gets the ear tip seal check there instead, unless it turns out not
+        // to have that either.
         private void ApplyTouchPanelSupport()
         {
             bool supported = TouchPanelSupported;
+            bool sealRow = !supported && sealTestSupported != false;
+            if (touchPanelCaptionLabel != null) touchPanelCaptionLabel.Visible = !sealRow;
+            if (touchPanelLabel != null) touchPanelLabel.Visible = !sealRow;
             if (touchOnButton != null) touchOnButton.Visible = supported;
             if (touchOffButton != null) touchOffButton.Visible = supported;
             if (touchOnTrayItem != null) touchOnTrayItem.Available = supported;
             if (touchOffTrayItem != null) touchOffTrayItem.Available = supported;
-            SetTouchPanelState(null);
+            if (sealTestCaptionLabel != null) sealTestCaptionLabel.Visible = sealRow;
+            if (sealTestLabel != null) sealTestLabel.Visible = sealRow;
+            if (sealTestButton != null) sealTestButton.Visible = sealRow;
+            if (sealTestTrayItem != null) sealTestTrayItem.Available = sealTestSupported == true;
+            ShowTouchPanelState();
+            ShowSealTestState();
         }
 
         private void SetTouchPanelState(bool? enabled)
+        {
+            touchPanelEnabled = enabled;
+            ShowTouchPanelState();
+        }
+
+        private void ShowTouchPanelState()
         {
             if (!TouchPanelSupported)
             {
                 if (touchPanelLabel != null) touchPanelLabel.Text = "Not available on this model";
                 return;
             }
-            if (touchPanelLabel != null) touchPanelLabel.Text = enabled.HasValue ? (enabled.Value ? "On" : "Off") : "Waiting";
-            SetOptionPair(touchOnButton, touchOffButton, enabled, blue, blue);
+            string text = touchPanelEnabled.HasValue ? (touchPanelEnabled.Value ? "On" : "Off") : "Waiting";
+            // The seal check has no row of its own on a model with both, so
+            // this one says where to find it.
+            if (sealTestSupported == true) text += " · Ear tip seal check is in the tray menu";
+            if (touchPanelLabel != null) touchPanelLabel.Text = text;
+            SetOptionPair(touchOnButton, touchOffButton, touchPanelEnabled, blue, blue);
+        }
+
+        private void ShowSealTestState()
+        {
+            bool ready = sealTestSupported == true && !sealTestRunning;
+            if (sealTestButton != null) sealTestButton.Enabled = ready;
+            if (sealTestTrayItem != null) sealTestTrayItem.Enabled = ready;
+            if (sealTestLabel == null) return;
+            if (sealTestRunning) sealTestLabel.Text = "Checking...";
+            else if (sealTestSupported != true) sealTestLabel.Text = "Waiting";
+            else sealTestLabel.Text = sealTestResultText ?? "Not checked yet";
         }
 
         private void SetAutoPowerState(string state)
@@ -1868,6 +1931,8 @@ namespace Xm5ControlUi
             touchOffTrayItem = AddTrayAction(menu.Items, "Touch sensor control panel: Off", () => SetTouchPanelAsync(false));
             AddTrayAction(menu.Items, "Automatic power off: On", SetAutoPowerRemovedAsync);
             AddTrayAction(menu.Items, "Automatic power off: Off", SetAutoPowerDisabledAsync);
+            sealTestTrayItem = AddTrayAction(menu.Items, "Check ear tip seal", CheckSealAsync);
+            sealTestTrayItem.Available = sealTestSupported == true;
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Configure shortcuts...", null, (s, e) => ConfigureShortcuts());
 
@@ -2052,6 +2117,7 @@ namespace Xm5ControlUi
                 new ShortcutAction("pauseoff", "Pause when headphones are removed: Off"),
                 new ShortcutAction("touchon", "Touch sensor control panel: On"),
                 new ShortcutAction("touchoff", "Touch sensor control panel: Off"),
+                new ShortcutAction("sealcheck", "Check ear tip seal"),
                 new ShortcutAction("autopowerremoved", "Automatic power off: On"),
                 new ShortcutAction("autopowerdisabled", "Automatic power off: Off")
             };
@@ -2565,6 +2631,10 @@ namespace Xm5ControlUi
             {
                 await SetTouchPanelAsync(false);
             }
+            else if (string.Equals(actionId, "sealcheck", StringComparison.OrdinalIgnoreCase))
+            {
+                await CheckSealAsync();
+            }
             else if (string.Equals(actionId, "autopowerremoved", StringComparison.OrdinalIgnoreCase))
             {
                 await SetAutoPowerRemovedAsync();
@@ -2583,6 +2653,15 @@ namespace Xm5ControlUi
             // Which NCASM inquired type answers is a property of the device, so a
             // different one has to prove it again.
             if (changed) ncasmTypeSeen = 0;
+            // So does whether it has the ear tip seal test, and a result from
+            // another headset says nothing about this one.
+            if (changed)
+            {
+                sealTestSupported = null;
+                sealTestMisses = 0;
+                sealTestResultText = null;
+                touchPanelEnabled = null;
+            }
             // Both belong to the headset that answered, not to this app.
             if (changed) { codecText = null; activeDeviceText = null; codecStale = false; }
             // Another headset's battery is not this one's.
@@ -2761,6 +2840,7 @@ namespace Xm5ControlUi
             ParseBattery(output);
             ParseCodec(output);
             ParseActiveDevice(output);
+            ParseSealTestSupport(output);
             if (overtaken) return;
             ParseMode(output);
             ParseExtraSettings(output);
@@ -2783,6 +2863,7 @@ namespace Xm5ControlUi
             ParseBattery(output);
             ParseCodec(output);
             ParseActiveDevice(output);
+            ParseSealTestSupport(output);
             // Left unmarked, so the next detect tick reads the settings again
             // once the write has gone out.
             if (settingWriteCount != writesBefore) return;
@@ -4295,6 +4376,95 @@ namespace Xm5ControlUi
             await RunSettingWriteAsync(WithDevice("raw \"D8 D1 00 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting touch panel");
         }
 
+        // A headset without the seal test acks the inquiry and never answers
+        // it, which a batch cut short by a dropped link looks like too. So a
+        // miss only counts when the query that follows it in the batch was
+        // answered, and it takes three to settle on "no".
+        private void ParseSealTestSupport(string output)
+        {
+            if (sealTestSupported.HasValue) return;
+            if (Regex.IsMatch(output, @"payload:\s*F1\s+06\s+[0-9A-F]{2}", RegexOptions.IgnoreCase))
+            {
+                sealTestSupported = true;
+            }
+            else if (Regex.IsMatch(output, @"payload:\s*D7\s+D1\b", RegexOptions.IgnoreCase) && ++sealTestMisses >= 3)
+            {
+                sealTestSupported = false;
+            }
+            if (sealTestSupported.HasValue) ApplyTouchPanelSupport();
+        }
+
+        private async Task CheckSealAsync()
+        {
+            if (sealTestRunning) return;
+            // Still reachable from a keyboard shortcut on a model without it.
+            if (sealTestSupported != true)
+            {
+                lastActionLabel.Text = "Ear tip seal check not available" + (currentProfile != null ? " on " + currentProfile.DisplayName : "");
+                return;
+            }
+
+            sealTestRunning = true;
+            ShowSealTestState();
+            lastActionLabel.Text = "Checking ear tip seal";
+            string output;
+            try
+            {
+                output = await RunBackendAsync(WithDevice("sealtest"), "Checking ear tip seal");
+            }
+            finally
+            {
+                sealTestRunning = false;
+            }
+            if (IsClosing) return;
+
+            bool measured;
+            string outcome = SealTestOutcome(output, out measured);
+            // The row shows how the last check went, until the next one. Only
+            // a measurement carries its time: a check that could not run is
+            // not a reading that goes out of date.
+            sealTestResultText = measured ? outcome + ", checked " + DateTime.Now.ToShortTimeString() : outcome;
+            ShowSealTestState();
+            lastActionLabel.Text = "Ear tip seal: " + outcome;
+            // Started from the tray or a shortcut, there is no row to read.
+            if (!WindowIsShowing)
+            {
+                Notify("Ear tip seal: " + outcome + "\nClick to check again");
+                sealTestNoticeShowing = true;
+            }
+        }
+
+        private static string SealTestOutcome(string output, out bool measured)
+        {
+            measured = false;
+            output = output ?? "";
+            var result = Regex.Match(output, @"seal test:\s*left\s+(good|poor);\s*right\s+(good|poor)", RegexOptions.IgnoreCase);
+            if (result.Success)
+            {
+                measured = true;
+                return "Left " + result.Groups[1].Value.ToLowerInvariant() + " · Right " + result.Groups[2].Value.ToLowerInvariant();
+            }
+
+            var error = Regex.Match(output, @"seal test:\s*(?:refused|failed);\s*error\s+(\d+)", RegexOptions.IgnoreCase);
+            if (error.Success)
+            {
+                switch (error.Groups[1].Value)
+                {
+                    case "1": return "Left earbud is not connected";
+                    case "2": return "Right earbud is not connected";
+                    case "4": return "Left earbud is not in your ear";
+                    case "5": return "Right earbud is not in your ear";
+                    case "6": return "Neither earbud is in your ear";
+                    case "7": return "Could not measure, try again";
+                    default: return "Not available right now";
+                }
+            }
+
+            if (output.Contains("seal test: unsupported")) return "Not available on this model";
+            if (output.Contains("Could not open")) return UnreachableStatus(output);
+            return "No result, try again";
+        }
+
         private async Task SetMultipointAsync(bool enabled)
         {
             SetMultipointState(enabled);
@@ -4699,6 +4869,8 @@ namespace Xm5ControlUi
         private void Notify(string message)
         {
             if (!trayNotifications || trayIcon == null || trayCleanupStarted) return;
+            // Whatever this replaces, a click on it must not start a seal check.
+            sealTestNoticeShowing = false;
             try
             {
                 trayIcon.ShowBalloonTip(1000, AppTitle(), message, ToolTipIcon.Info);
@@ -4896,6 +5068,12 @@ namespace Xm5ControlUi
 
         private Label AddActionRow(Control parent, string caption, string value, int top, params PillButton[] buttons)
         {
+            Label rowCaption;
+            return AddActionRow(parent, caption, value, top, out rowCaption, buttons);
+        }
+
+        private Label AddActionRow(Control parent, string caption, string value, int top, out Label rowCaption, params PillButton[] buttons)
+        {
             var captionLabel = new Label
             {
                 Text = caption,
@@ -4906,6 +5084,7 @@ namespace Xm5ControlUi
                 Size = new Size(220, 20)
             };
             parent.Controls.Add(captionLabel);
+            rowCaption = captionLabel;
 
             var valueLabel = new Label
             {

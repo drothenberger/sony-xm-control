@@ -28,6 +28,7 @@ Unofficial Windows controller for Sony 1000X headphones and earbuds.
 - Speak-to-Chat toggle
 - Wearing sensor pause toggle
 - Touch sensor panel toggle
+- Ear tip seal check (WF-1000XM6)
 - Automatic power off setting
 - Tray quick actions
 - Optional sound pressure reading on the tray icon
@@ -212,6 +213,15 @@ so an unmeasured stretch cannot pass for a quiet one. The window counts as
 watching the level, so while it is open and not minimized it keeps the meter
 running even with the tray reading off or paused.
 
+The ear tip seal check is the earbuds' own test: they play a tone for about
+seven seconds and report each side's seal as good or poor. Both earbuds have to
+be in your ears, or the check is refused and says which one is missing.
+Whatever was playing stops for the check and does not start again by itself.
+It is offered only when the headset reports having the test. On the
+WF-1000XM6 it takes the place of the touch sensor panel row, which that model
+has no use for; a model with both keeps the touch row, and the check is in the
+tray menu.
+
 Useful when adding support for a new model:
 
 ```text
@@ -220,6 +230,7 @@ xm5ctl listen --hex          dump notification frames as the headset sends them
 xm5ctl raw "66 19" --hex     send one payload and print the raw reply bytes
 xm5ctl soundpressure --samples 10
                              read the sound pressure meter ten times
+xm5ctl sealtest              run the ear tip seal check and print each side's result
 ```
 
 The app has no Bluetooth code of its own: every action runs `xm5ctl` once and

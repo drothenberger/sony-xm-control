@@ -85,6 +85,7 @@ static void print_usage(void) {
     puts("  xm5ctl soundpressure [--samples N] [--interval MS] [--timeout MS]");
     puts("                       [--battery \"22 01;22 02\"] [--battery-every N]");
     puts("                       [--safe-listening-every N]");
+    puts("  xm5ctl sealtest [--timeout MS] [--name TEXT]");
     puts("  xm5ctl listen [--timeout MS] [--hex]");
     puts("  xm5ctl raw \"22 00\" [--data-type mdr|mdr2] [--ack-only] [--no-ack]");
     puts("  xm5ctl batch \"22 00;66 17;E6 01\" [--timeout MS] [--name TEXT]");
@@ -1595,6 +1596,148 @@ static int invoke_sound_pressure(const options_t *opt) {
     return 0;
 }
 
+/*
+ * Run the ear tip seal test, which Sound Connect offers as a check of the
+ * wearing condition: the earbuds play a tone and judge each side's seal as
+ * good or poor. It is the system family's inquired type 06.
+ *
+ *   F0 06                -> F1 06 <seconds> ...      how long a test takes
+ *   F4 06 <mode> <count>                            enter (01 01) or leave (00 00) the test mode
+ *   F8 06 00 00 FF FF    -> F9 06 <status> <error>   start; status 01 = started
+ *                        <- F9 06 02 ...             pushed when it completes
+ *                        <- FD 06 <left> <right>     pushed result; 00 = good, 01 = poor
+ *
+ * A model without the test acks F0 06 and never answers it. With an earbud out
+ * of the ear the start is refused at once: status 00 and an error naming the
+ * side. FA 06 reads a result back too, but it still answers with the previous
+ * run's result after a refusal, so only the pushed one is trusted here.
+ */
+static int invoke_seal_test(const options_t *opt) {
+    static const uint8_t capability[] = { 0xf0, 0x06 };
+    static const uint8_t mode_in[] = { 0xf4, 0x06, 0x01, 0x01 };
+    static const uint8_t mode_out[] = { 0xf4, 0x06, 0x00, 0x00 };
+    static const uint8_t start_test[] = { 0xf8, 0x06, 0x00, 0x00, 0xff, 0xff };
+    mdr_frame_t responses[8];
+    parser_t parser = { 0 };
+    uint8_t seq = 0;
+    int seconds = -1;
+    int status = -1;
+    int error = 0;
+    bool have_result = false;
+    uint8_t left = 0;
+    uint8_t right = 0;
+    int count;
+    int rc = 0;
+    DWORD start;
+    int budget_ms;
+    SOCKET s;
+    wchar_t selected[BLUETOOTH_MAX_NAME_SIZE] = L"";
+
+    s = connect_best(opt->name_filter, opt->connect_timeout_ms, selected, ARRAY_LEN(selected));
+    if (s == INVALID_SOCKET) {
+        report_open_failure();
+        return 1;
+    }
+
+    wprintf(L"Connecting to %ls, protocol v2...\n", selected[0] ? selected : L"<unnamed>");
+
+    count = send_payload_seq(s, capability, sizeof(capability), 0x0c, seq, opt->timeout_ms, opt->no_ack,
+                             0xf1, responses, (int)ARRAY_LEN(responses));
+    seq ^= 1;
+    if (count < 0) {
+        closesocket(s);
+        return 1;
+    }
+    for (int i = 0; i < count; i++) {
+        const mdr_frame_t *f = &responses[i];
+        if (f->valid && f->payload_len >= 3 && f->payload[0] == 0xf1 && f->payload[1] == 0x06) {
+            seconds = f->payload[2];
+        }
+    }
+    if (seconds < 0) {
+        puts("seal test: unsupported");
+        closesocket(s);
+        return 0;
+    }
+
+    count = send_payload_seq(s, mode_in, sizeof(mode_in), 0x0c, seq, opt->timeout_ms, opt->no_ack,
+                             0xf5, responses, (int)ARRAY_LEN(responses));
+    seq ^= 1;
+    if (count < 0) {
+        closesocket(s);
+        return 1;
+    }
+
+    count = send_payload_seq(s, start_test, sizeof(start_test), 0x0c, seq, opt->timeout_ms, opt->no_ack,
+                             0xf9, responses, (int)ARRAY_LEN(responses));
+    seq ^= 1;
+    if (count < 0) {
+        closesocket(s);
+        return 1;
+    }
+    for (int i = 0; i < count; i++) {
+        const mdr_frame_t *f = &responses[i];
+        if (f->valid && f->payload_len >= 4 && f->payload[0] == 0xf9 && f->payload[1] == 0x06) {
+            status = f->payload[2];
+            error = f->payload[3];
+        }
+    }
+
+    if (status == 1) {
+        printf("seal test: started; %d s\n", seconds);
+        fflush(stdout);
+
+        /* The result follows the completion by a few tens of milliseconds. */
+        budget_ms = seconds * 1000 + 5000;
+        start = GetTickCount();
+        while (!have_result && status != 3 && (int)(GetTickCount() - start) < budget_ms) {
+            mdr_frame_t rx[8];
+            count = recv_frames(s, &parser, 250, rx, (int)ARRAY_LEN(rx));
+            if (count < 0) {
+                rc = 1;
+                break;
+            }
+            for (int i = 0; i < count; i++) {
+                const mdr_frame_t *f = &rx[i];
+                if (!f->valid || f->data_type == 0x01) continue;
+                if (f->ack_required) send_ack(s, f->sequence);
+                if (f->payload_len >= 4 && f->payload[1] == 0x06) {
+                    if (f->payload[0] == 0xf9) {
+                        status = f->payload[2];
+                        error = f->payload[3];
+                    } else if (f->payload[0] == 0xfd && status == 2) {
+                        left = f->payload[2];
+                        right = f->payload[3];
+                        have_result = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (rc != 0) {
+        /* The link went, and the mode with it. */
+        closesocket(s);
+        return rc;
+    }
+
+    if (have_result) {
+        printf("seal test: left %s; right %s\n", left == 0 ? "good" : "poor", right == 0 ? "good" : "poor");
+    } else if (status == 0 || status == 3) {
+        printf("seal test: %s; error %d\n", status == 0 ? "refused" : "failed", error);
+    } else {
+        puts("seal test: no result");
+    }
+    fflush(stdout);
+
+    /* Left in the mode, the earbuds would still be waiting for a test. */
+    send_payload_seq(s, mode_out, sizeof(mode_out), 0x0c, seq, opt->timeout_ms, opt->no_ack,
+                     0xf5, responses, (int)ARRAY_LEN(responses));
+
+    closesocket(s);
+    return 0;
+}
+
 static int invoke_listen(const options_t *opt) {
     SOCKET s;
     wchar_t selected[BLUETOOTH_MAX_NAME_SIZE] = L"";
@@ -1699,6 +1842,8 @@ int main(int argc, char **argv) {
         rc = invoke_payload(&opt, opt.raw_payload, opt.raw_len, opt.data_type, opt.ack_only ? -2 : -1);
     } else if (strcmp(opt.action, "soundpressure") == 0) {
         rc = invoke_sound_pressure(&opt);
+    } else if (strcmp(opt.action, "sealtest") == 0) {
+        rc = invoke_seal_test(&opt);
     } else if (strcmp(opt.action, "listen") == 0) {
         rc = invoke_listen(&opt);
     } else if (strcmp(opt.action, "batch") == 0) {
