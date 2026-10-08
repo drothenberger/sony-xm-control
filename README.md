@@ -186,6 +186,16 @@ The tray digits turn yellow when the lower earbud drops below 30% and red below
 features off. Only a recent reading colours them, and dimming for a stalled reading takes
 precedence, so grey still means only that the number has stopped updating.
 
+On the WF-1000XM6 the tooltip and the window's Battery row also estimate how
+long the lower earbud has until 20%, for example "~2 h 10 min to 20%". The
+estimate follows a discharge curve measured on the WF-1000XM6, which does not
+fall evenly: the level holds at 80% for about 50 minutes after leaving the
+case, then crosses 30-20% much faster than 60-50%. Once the level has dropped
+a few percent, the estimate also adjusts to how fast the current run is going.
+It is left out for other models, for a reading that is out of date, and at 20%
+or below. Above 80%, which only happens with Battery Care off, the rate is
+assumed rather than measured.
+
 The icon has five appearances and they are meant to be told apart: bright
 digits for a live reading, a bright dash when nothing is playing, a bright
 `Off` when Safe Listening is switched off in Sound Connect, two bright bars
