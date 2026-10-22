@@ -639,6 +639,7 @@ namespace Xm5ControlUi
         private bool? autoAmbientSupported;
         private bool updatingNoiseUi;
         private int ncasmTypeSeen;
+        private int ncasm17AloneCount;
         private PillButton ancButton;
         private PillButton ambientButton;
         private PillButton offButton;
@@ -2710,7 +2711,11 @@ namespace Xm5ControlUi
             currentProfile = profile;
             // Which NCASM inquired type answers is a property of the device, so a
             // different one has to prove it again.
-            if (changed) ncasmTypeSeen = 0;
+            if (changed)
+            {
+                ncasmTypeSeen = 0;
+                ncasm17AloneCount = 0;
+            }
             // A run is one headset's battery going down.
             if (changed) drainEstimate.Reset();
             // So does whether it has the ear tip seal test, and a result from
@@ -4631,9 +4636,25 @@ namespace Xm5ControlUi
             // off. So once 0x19 has answered for this device, a lone 0x17 line
             // means its reply went missing - report nothing rather than a state
             // the headset is not in.
+            //
+            // Before either type has answered, one lone 0x17 line is not enough
+            // either: it is what a dropped 0x19 reply looks like on the very
+            // first refresh, and settling on 0x17 then would narrow every later
+            // batch to 66 17 and show "Off" for the rest of the session. Like
+            // the backend's probe, 0x17 is taken only once it has answered
+            // alone twice in a row.
             int lineType = string.Equals(match.Groups[1].Value, "19", StringComparison.OrdinalIgnoreCase) ? 0x19 : 0x17;
-            if (lineType == 0x19) ncasmTypeSeen = 0x19;
+            if (lineType == 0x19)
+            {
+                ncasmTypeSeen = 0x19;
+                ncasm17AloneCount = 0;
+            }
             else if (ncasmTypeSeen == 0x19) return false;
+            else if (ncasmTypeSeen == 0 && ++ncasm17AloneCount < 2)
+            {
+                SetModeWaiting();
+                return false;
+            }
             else ncasmTypeSeen = 0x17;
 
             string master = Capitalize(match.Groups[2].Value);
@@ -4673,6 +4694,14 @@ namespace Xm5ControlUi
                 updatingNoiseUi = false;
             }
             return true;
+        }
+
+        private void SetModeWaiting()
+        {
+            bigModeLabel.Text = "Waiting";
+            bigDetailLabel.Text = "Reading noise control from the headset";
+            SetModeButtonState(null);
+            SetAutoAmbientWaiting();
         }
 
         private void SetAutoAmbientWaiting()
