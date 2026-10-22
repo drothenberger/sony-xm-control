@@ -3788,12 +3788,22 @@ namespace Xm5ControlUi
             }
         }
 
+        // The hero card shows the last command sent from this app under the live
+        // state, and it can stay there for hours while the tray holds the app.
+        // The label and time keep it from reading as the current state once the
+        // headset or the phone has changed things since. Messages that are not
+        // commands (hints, device detection) set the label directly.
+        private void SetLastAction(string text)
+        {
+            lastActionLabel.Text = "Last command: " + text + " · " + DateTime.Now.ToShortTimeString();
+        }
+
         private async Task SetAncAsync()
         {
             bigModeLabel.Text = "ANC";
             bigDetailLabel.Text = "Noise cancelling active";
             SetModeButtonState("ANC");
-            lastActionLabel.Text = "ANC selected";
+            SetLastAction("ANC selected");
             ParseMode(await RunSettingWriteAsync(WithDevice("ncasm-set --mode anc"), "Setting ANC"));
         }
 
@@ -3806,7 +3816,7 @@ namespace Xm5ControlUi
             bigModeLabel.Text = "Ambient";
             bigDetailLabel.Text = kind + " ambient level " + clamped;
             SetModeButtonState("Ambient");
-            lastActionLabel.Text = (voice ? "Voice ambient " : "Ambient ") + clamped;
+            SetLastAction((voice ? "Voice ambient " : "Ambient ") + clamped);
             string args = "ncasm-set --mode ambient --level " + clamped + " --voice " + (voice ? "on" : "off");
             // Report what the headset applied rather than what was asked for.
             // ParseMode refreshes these controls from the reply, and the two can
@@ -3815,11 +3825,11 @@ namespace Xm5ControlUi
             // presenting the requested value as a confirmation.
             if (ParseMode(await RunSettingWriteAsync(WithDevice(args), "Setting ambient")))
             {
-                lastActionLabel.Text = (IsVoiceAmbientSelected() ? "Voice ambient " : "Ambient ") + levelSlider.Value;
+                SetLastAction((IsVoiceAmbientSelected() ? "Voice ambient " : "Ambient ") + levelSlider.Value);
             }
             else
             {
-                lastActionLabel.Text = (voice ? "Voice ambient " : "Ambient ") + clamped + " not confirmed";
+                SetLastAction((voice ? "Voice ambient " : "Ambient ") + clamped + " not confirmed");
             }
         }
 
@@ -3827,10 +3837,10 @@ namespace Xm5ControlUi
         {
             if (autoAmbientSupported == false)
             {
-                lastActionLabel.Text = "Auto ambient not supported";
+                SetLastAction("Auto ambient not supported");
                 return;
             }
-            lastActionLabel.Text = "Auto ambient " + (enabled ? "on" : "off");
+            SetLastAction("Auto ambient " + (enabled ? "on" : "off"));
             // Auto and manual are two flavours of ambient sound, so both buttons
             // select ambient and only the auto flag differs. Changing the mode on
             // one and not the other made the pair behave inconsistently from noise
@@ -3845,10 +3855,10 @@ namespace Xm5ControlUi
         {
             if (autoAmbientSupported == false)
             {
-                lastActionLabel.Text = "Auto ambient not supported";
+                SetLastAction("Auto ambient not supported");
                 return;
             }
-            lastActionLabel.Text = "Auto ambient sensitivity " + sensitivity;
+            SetLastAction("Auto ambient sensitivity " + sensitivity);
             string args = "ncasm-set --auto on --sensitivity " + sensitivity + "";
             ParseMode(await RunSettingWriteAsync(WithDevice(args), "Setting sensitivity"));
         }
@@ -3858,14 +3868,14 @@ namespace Xm5ControlUi
             bigModeLabel.Text = "Off";
             bigDetailLabel.Text = "Noise control disabled";
             SetModeButtonState("Off");
-            lastActionLabel.Text = "Noise control off";
+            SetLastAction("Noise control off");
             ParseMode(await RunSettingWriteAsync(WithDevice("ncasm-set --mode off"), "Turning off"));
         }
 
         private async Task SetDseeAsync(bool enabled)
         {
             SetDseeState(enabled);
-            lastActionLabel.Text = "DSEE Extreme " + (enabled ? "Auto" : "Off");
+            SetLastAction("DSEE Extreme " + (enabled ? "Auto" : "Off"));
             await RunSettingWriteAsync(WithDevice("raw \"E8 01 " + (enabled ? "01" : "00") + "\" --ack-only"), "Setting DSEE");
         }
 
@@ -3880,7 +3890,7 @@ namespace Xm5ControlUi
             string label = hasCachedValues ? FormatEqSummary(preset, cachedValues) : eqProfile.PresetName(preset);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = label;
             if (hasCachedValues) UpdateEqualizerUi(preset, cachedValues);
-            lastActionLabel.Text = "Equalizer preset updating";
+            SetLastAction("Equalizer preset updating");
 
             string payload = FormatEqualizerPresetPayload(preset);
             var output = await RunBackendSilentAsync(WithDevice("batch \"" + payload + "\""));
@@ -3888,7 +3898,7 @@ namespace Xm5ControlUi
             if (output.Contains("Could not open"))
             {
                 SetStatus(UnreachableStatus(output), red);
-                lastActionLabel.Text = "Equalizer preset not sent";
+                SetLastAction("Equalizer preset not sent");
                 return;
             }
 
@@ -3914,7 +3924,7 @@ namespace Xm5ControlUi
             {
                 await RefreshEqualizerQuietAsync(preset);
             }
-            lastActionLabel.Text = "Equalizer preset updated";
+            SetLastAction("Equalizer preset updated");
         }
 
         private async Task CopyEqualizerToPresetAsync(int preset)
@@ -3925,7 +3935,7 @@ namespace Xm5ControlUi
             InvalidateEqualizerFetch();
             int[] values = CurrentEqValues();
             string presetName = eqProfile.PresetName(preset);
-            lastActionLabel.Text = "Copying to " + presetName;
+            SetLastAction("Copying to " + presetName);
 
             string payload = FormatEqualizerPayload(preset, values);
             var output = await RunBackendSilentAsync(WithDevice("raw \"" + payload + "\" --ack-only"));
@@ -3933,7 +3943,7 @@ namespace Xm5ControlUi
             if (output.Contains("Could not open"))
             {
                 SetStatus(UnreachableStatus(output), red);
-                lastActionLabel.Text = "Not copied to " + presetName;
+                SetLastAction("Not copied to " + presetName);
                 return;
             }
 
@@ -3941,7 +3951,7 @@ namespace Xm5ControlUi
             currentEqPreset = preset;
             SelectEqPresetSilently(preset);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
-            lastActionLabel.Text = "Copied to " + presetName;
+            SetLastAction("Copied to " + presetName);
         }
 
         private void ShowEqualizerCopyMenu(Control anchor)
@@ -4020,7 +4030,7 @@ namespace Xm5ControlUi
             currentEqPreset = preset;
             CacheEqValues(preset, values);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(preset, values);
-            lastActionLabel.Text = quiet ? "Equalizer updating" : "Equalizer applied";
+            SetLastAction(quiet ? "Equalizer updating" : "Equalizer applied");
 
             string payload = FormatEqualizerPayload(preset, values);
             if (quiet)
@@ -4029,16 +4039,16 @@ namespace Xm5ControlUi
                 if (output == null)
                 {
                     liveEqSendPending = true;
-                    lastActionLabel.Text = "Equalizer waiting";
+                    SetLastAction("Equalizer waiting");
                     return;
                 }
                 if (output.Contains("Could not open"))
                 {
                     SetStatus(UnreachableStatus(output), red);
-                    lastActionLabel.Text = "Equalizer not sent";
+                    SetLastAction("Equalizer not sent");
                     return;
                 }
-                lastActionLabel.Text = "Equalizer updated";
+                SetLastAction("Equalizer updated");
                 return;
             }
 
@@ -4115,7 +4125,7 @@ namespace Xm5ControlUi
             // already selected rather than dragging the user back to Manual.
             int target = EqEditTarget();
             if (eqSliders != null) ResetEqSliders(target);
-            lastActionLabel.Text = "Equalizer set to flat";
+            SetLastAction("Equalizer set to flat");
             string payload = FormatEqualizerPayload(target, FlatEqValues());
             await RunSettingWriteAsync(WithDevice("raw \"" + payload + "\" --ack-only"), "Setting equalizer");
         }
@@ -4143,7 +4153,7 @@ namespace Xm5ControlUi
                 if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = eqProfile.PresetName(target) + " / Flat";
                 int[] flatValues = FlatEqValues();
                 CacheEqValues(target, flatValues);
-                lastActionLabel.Text = "Equalizer flattened";
+                SetLastAction("Equalizer flattened");
             }
             finally
             {
@@ -4231,7 +4241,7 @@ namespace Xm5ControlUi
             SelectEqPresetSilently(target);
             CacheEqValues(target, values);
             if (eqCardSummaryLabel != null) eqCardSummaryLabel.Text = FormatEqSummary(target, values);
-            lastActionLabel.Text = "Equalizer updating";
+            SetLastAction("Equalizer updating");
             ScheduleLiveEqualizerApply();
         }
 
@@ -4384,7 +4394,7 @@ namespace Xm5ControlUi
         private bool EqLayoutReady()
         {
             if (eqLayoutKnown) return true;
-            if (lastActionLabel != null) lastActionLabel.Text = "Equalizer waiting for device";
+            if (lastActionLabel != null) SetLastAction("Equalizer waiting for device");
             return false;
         }
 
@@ -4456,7 +4466,7 @@ namespace Xm5ControlUi
                 return;
             }
             SetConnectionQualityState(prioritizeSound);
-            lastActionLabel.Text = prioritizeSound ? "Connection quality set to quality" : "Connection quality set to stability";
+            SetLastAction(prioritizeSound ? "Connection quality set to quality" : "Connection quality set to stability");
             await RunSettingWriteAsync(WithDevice("raw \"E8 00 " + (prioritizeSound ? "00" : "01") + "\" --ack-only"), "Setting connection quality");
         }
 
@@ -4464,14 +4474,14 @@ namespace Xm5ControlUi
         {
             string value = enabled ? "00" : "01";
             SetSpeakToChatState(enabled);
-            lastActionLabel.Text = "Speak-to-Chat " + (enabled ? "on" : "off");
+            SetLastAction("Speak-to-Chat " + (enabled ? "on" : "off"));
             await RunSettingWriteAsync(WithDevice("raw \"F8 02 " + value + " " + value + "\" --ack-only"), "Setting Speak-to-Chat");
         }
 
         private async Task SetWearPauseAsync(bool enabled)
         {
             SetWearPauseState(enabled);
-            lastActionLabel.Text = "Pause when removed " + (enabled ? "on" : "off");
+            SetLastAction("Pause when removed " + (enabled ? "on" : "off"));
             await RunSettingWriteAsync(WithDevice("raw \"F8 01 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting wearing sensor");
         }
 
@@ -4480,11 +4490,11 @@ namespace Xm5ControlUi
             // Still reachable from a keyboard shortcut bound on another model.
             if (!TouchPanelSupported)
             {
-                lastActionLabel.Text = "Touch panel not available on " + currentProfile.DisplayName;
+                SetLastAction("Touch panel not available on " + currentProfile.DisplayName);
                 return;
             }
             SetTouchPanelState(enabled);
-            lastActionLabel.Text = "Touch panel " + (enabled ? "on" : "off");
+            SetLastAction("Touch panel " + (enabled ? "on" : "off"));
             await RunSettingWriteAsync(WithDevice("raw \"D8 D1 00 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting touch panel");
         }
 
@@ -4512,13 +4522,13 @@ namespace Xm5ControlUi
             // Still reachable from a keyboard shortcut on a model without it.
             if (sealTestSupported != true)
             {
-                lastActionLabel.Text = "Ear tip seal check not available" + (currentProfile != null ? " on " + currentProfile.DisplayName : "");
+                SetLastAction("Ear tip seal check not available" + (currentProfile != null ? " on " + currentProfile.DisplayName : ""));
                 return;
             }
 
             sealTestRunning = true;
             ShowSealTestState();
-            lastActionLabel.Text = "Checking ear tip seal";
+            SetLastAction("Checking ear tip seal");
             string output;
             try
             {
@@ -4537,7 +4547,7 @@ namespace Xm5ControlUi
             // not a reading that goes out of date.
             sealTestResultText = measured ? outcome + ", checked " + DateTime.Now.ToShortTimeString() : outcome;
             ShowSealTestState();
-            lastActionLabel.Text = "Ear tip seal: " + outcome;
+            SetLastAction("Ear tip seal: " + outcome);
             // Started from the tray or a shortcut, there is no row to read.
             if (!WindowIsShowing)
             {
@@ -4580,21 +4590,21 @@ namespace Xm5ControlUi
         private async Task SetMultipointAsync(bool enabled)
         {
             SetMultipointState(enabled);
-            lastActionLabel.Text = "Multipoint " + (enabled ? "on" : "off");
+            SetLastAction("Multipoint " + (enabled ? "on" : "off"));
             await RunSettingWriteAsync(WithDevice("raw \"D8 D2 00 " + (enabled ? "00" : "01") + "\" --ack-only"), "Setting multipoint");
         }
 
         private async Task SetAutoPowerRemovedAsync()
         {
             SetAutoPowerState("removed");
-            lastActionLabel.Text = "Automatic power off set to on";
+            SetLastAction("Automatic power off set to on");
             await RunSettingWriteAsync(WithDevice("raw \"28 05 10 00\" --ack-only"), "Setting auto power");
         }
 
         private async Task SetAutoPowerDisabledAsync()
         {
             SetAutoPowerState("disabled");
-            lastActionLabel.Text = "Automatic power off set to off";
+            SetLastAction("Automatic power off set to off");
             await RunSettingWriteAsync(WithDevice("raw \"28 05 11 00\" --ack-only"), "Setting auto power");
         }
 
