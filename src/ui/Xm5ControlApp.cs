@@ -615,6 +615,7 @@ namespace Xm5ControlUi
         private bool sealTestRunning;
         private bool sealTestNoticeShowing;
         private string sealTestResultText;
+        private string sealTestPaintedText;
         private PillButton autoPowerRemovedButton;
         private PillButton autoPowerDisableButton;
         private PillButton configureShortcutsButton;
@@ -1636,6 +1637,7 @@ namespace Xm5ControlUi
             sealTestButton = NewOptionButton("Check");
             sealTestLabel = AddActionRow(parent, "Ear tip seal", "Waiting", 562, out sealTestCaptionLabel, sealTestButton);
             sealTestButton.Click += async (s, e) => await CheckSealAsync();
+            sealTestLabel.Paint += PaintSealTestRow;
 
             AddDivider(parent, 618);
             AddEyebrow(parent, "Power", 640);
@@ -1842,9 +1844,44 @@ namespace Xm5ControlUi
             if (sealTestButton != null) sealTestButton.Enabled = ready;
             if (sealTestTrayItem != null) sealTestTrayItem.Enabled = ready;
             if (sealTestLabel == null) return;
-            if (sealTestRunning) sealTestLabel.Text = "Checking...";
-            else if (sealTestSupported != true) sealTestLabel.Text = "Waiting";
-            else sealTestLabel.Text = sealTestResultText ?? "Not checked yet";
+            string text;
+            if (sealTestRunning) text = "Checking...";
+            else if (sealTestSupported != true) text = "Waiting";
+            else text = sealTestResultText ?? "Not checked yet";
+            // A result with a poor side is drawn by PaintSealTestRow, so the
+            // label's own text is kept empty and only names it.
+            sealTestPaintedText = Regex.IsMatch(text, @"\bpoor\b") ? text : null;
+            sealTestLabel.Text = sealTestPaintedText == null ? text : "";
+            sealTestLabel.AccessibleName = text;
+            sealTestLabel.Invalidate();
+        }
+
+        // A poor side is red, and semibold as well: the red is close to the
+        // row's grey in lightness, so the colour alone would not stand out to
+        // everyone. A good side keeps the row's grey rather than turning green.
+        private void PaintSealTestRow(object sender, PaintEventArgs e)
+        {
+            var label = (Label)sender;
+            string text = sealTestPaintedText;
+            if (text == null) return;
+
+            const TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+            int x = (TextRenderer.MeasureText(e.Graphics, "x", label.Font).Width -
+                     TextRenderer.MeasureText(e.Graphics, "x", label.Font, Size.Empty, flags).Width) / 2;
+            using (var poorFont = new Font("Segoe UI Semibold", label.Font.Size))
+            {
+                foreach (string part in Regex.Split(text, @"\b(poor)\b"))
+                {
+                    if (part.Length == 0) continue;
+                    bool poor = part == "poor";
+                    Font font = poor ? poorFont : label.Font;
+                    int mark = TextRenderer.MeasureText(e.Graphics, ".", font, Size.Empty, flags).Width;
+                    TextRenderer.DrawText(e.Graphics, part, font, new Point(x, 0), poor ? TrayBatteryCriticalColor : label.ForeColor, flags);
+                    // Measured against a trailing mark, since a run ending in
+                    // a space does not measure its space.
+                    x += TextRenderer.MeasureText(e.Graphics, part + ".", font, Size.Empty, flags).Width - mark;
+                }
+            }
         }
 
         private void SetAutoPowerState(string state)
