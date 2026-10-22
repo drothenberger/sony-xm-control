@@ -441,6 +441,10 @@ namespace Xm5ControlUi
         private bool minimizeToTray = true;
         private bool startMinimizedToTray;
         private bool hasShownOnce;
+        // The settings are only read while the window is showing, so whatever
+        // it shows on coming back is as old as the moment it was hidden. Until
+        // the next read lands it says so, rather than passing for current.
+        private bool stateOutOfDate;
         private bool trayNotifications = true;
         // The balloon explains where the window went the first time it
         // disappears. After that the user knows, and repeating it on every
@@ -735,7 +739,9 @@ namespace Xm5ControlUi
                     ConcealMainWindow(removeFromTaskbar: true);
                     NotifyHiddenInTray("Still running in the tray.");
                 }
+                NoteWindowShowing();
             };
+            VisibleChanged += (s, e) => NoteWindowShowing();
             Activated += async (s, e) =>
             {
                 if (hasShownOnce) await RunUiTaskAsync(AutoDetectTickAsync);
@@ -2473,10 +2479,11 @@ namespace Xm5ControlUi
             // only thing that wants to know.
             lastScanConnected = detection.Connected;
             bool changed = ApplyProfile(detection.Profile);
-            if (connectionLabel != null) connectionLabel.Text = detection.Connected ? "Connected" : "Not connected";
+            if (connectionLabel != null) connectionLabel.Text = detection.Connected ? ConnectedText() : "Not connected";
             if (lastActionLabel != null && changed) lastActionLabel.Text = "Detected " + detection.Profile.DisplayName;
             if (detection.Connected && controlInUse) SetStatus("Connected - controls in use by another app", amber);
-            else SetStatus(detection.Connected ? "Connected" : "Not connected", detection.Connected ? green : amber);
+            else if (detection.Connected) ShowConnectedStatus();
+            else SetStatus("Not connected", amber);
             return new DetectAttempt(detection);
         }
 
@@ -2540,8 +2547,8 @@ namespace Xm5ControlUi
             bool overtaken = settingWriteCount != writesBefore;
             if (!output.Contains("Could not open"))
             {
-                connectionLabel.Text = "Connected";
                 if (!overtaken) MarkStateRefreshed(detection);
+                connectionLabel.Text = ConnectedText();
             }
             ParseBattery(output);
             ParseCodec(output);
@@ -2564,7 +2571,6 @@ namespace Xm5ControlUi
                 return;
             }
 
-            if (connectionLabel != null) connectionLabel.Text = "Connected";
             ParseBattery(output);
             ParseCodec(output);
             ParseActiveDevice(output);
@@ -2574,7 +2580,8 @@ namespace Xm5ControlUi
             ParseMode(output);
             ParseExtraSettings(output);
             MarkStateRefreshed(detection);
-            SetStatus("Connected", green);
+            if (connectionLabel != null) connectionLabel.Text = ConnectedText();
+            ShowConnectedStatus();
         }
 
         private void MarkStateRefreshed(DeviceDetection detection)
@@ -2582,6 +2589,34 @@ namespace Xm5ControlUi
             lastStateRefreshProfile = detection != null ? detection.Profile : currentProfile;
             lastStateRefreshConnected = true;
             lastStateRefreshAt = DateTime.UtcNow;
+            stateOutOfDate = false;
+        }
+
+        // Hiding the window stops the settings being read, so they go out of
+        // date from then on. Coming back, the scan has kept "Connected" true,
+        // but nothing else below it is yet.
+        private void NoteWindowShowing()
+        {
+            if (IsClosing) return;
+            if (!WindowIsShowing)
+            {
+                if (hasShownOnce) stateOutOfDate = true;
+                return;
+            }
+            if (!stateOutOfDate || !lastScanConnected) return;
+            if (connectionLabel != null) connectionLabel.Text = ConnectedText();
+            if (!controlInUse) ShowConnectedStatus();
+        }
+
+        private string ConnectedText()
+        {
+            return stateOutOfDate ? "Connected · updating" : "Connected";
+        }
+
+        private void ShowConnectedStatus()
+        {
+            if (stateOutOfDate) SetStatus("Connected · updating settings...", blue);
+            else SetStatus("Connected", green);
         }
 
         // The meter answers on DATA_MDR_NO2, so it cannot ride along in the
