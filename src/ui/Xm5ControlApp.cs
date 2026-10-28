@@ -327,6 +327,10 @@ namespace Xm5ControlUi
         private const int HeroLastActionTop = 100;
         private const int AutoDetectIntervalMs = 4000;
         private const int AutoStateRefreshIntervalMs = 15000;
+        // Through the phone the full refresh takes 5-13 s, with the meter stream
+        // stopped all the while, and the phone names each change it makes as it
+        // makes it, so the full read is only the safety net there.
+        private const int AutoStateRefreshViaPhoneIntervalMs = 60000;
         private const int LiveEqDebounceMs = 260;
         // The phone sends one "changed" per setting it saw change, so a preset
         // tapped through several in a row arrives as a burst.
@@ -583,6 +587,9 @@ namespace Xm5ControlUi
         // Android app's PC link, "Bluetooth" over this PC's own; null with no
         // stream. Shown in the tray tooltip, beside the codec, and on the icon.
         private string meterLink;
+        // The last link a meter stream reported; meterLink is cleared while a
+        // job has the stream stopped.
+        private bool lastLinkViaPhone;
         // On Bluetooth although paired with the phone (xm5ctl pair): the exception
         // the icon marks. Without a pairing, Bluetooth is simply normal.
         private bool meterDirectMarked;
@@ -2814,7 +2821,9 @@ namespace Xm5ControlUi
                 // window asks for a refresh when it comes back.
                 if (!WindowIsShowing) return;
 
-                bool stateRefreshExpired = DateTime.UtcNow - lastStateRefreshAt >= TimeSpan.FromMilliseconds(AutoStateRefreshIntervalMs);
+                // Only while a meter stream is there to hear the phone.
+                int refreshIntervalMs = lastLinkViaPhone && ShouldRunMeter() ? AutoStateRefreshViaPhoneIntervalMs : AutoStateRefreshIntervalMs;
+                bool stateRefreshExpired = DateTime.UtcNow - lastStateRefreshAt >= TimeSpan.FromMilliseconds(refreshIntervalMs);
                 // Back from hidden, the settings may have changed meanwhile: read
                 // them now rather than when the next refresh is due.
                 if (!ReferenceEquals(lastStateRefreshProfile, detection.Profile) || !lastStateRefreshConnected || stateRefreshExpired || stateOutOfDate)
@@ -3339,7 +3348,7 @@ namespace Xm5ControlUi
 
             // The Android app says a setting changed there. The earbuds answer
             // most changes only to the app that made them, so without this the
-            // window would show it at the next 15 s refresh at the earliest.
+            // window would show it at the next timed refresh at the earliest.
             if (line.StartsWith("phone: changed", StringComparison.Ordinal))
             {
                 NotePhoneChange(line.Substring("phone: changed".Length));
@@ -3675,6 +3684,7 @@ namespace Xm5ControlUi
         // jobs are brief.
         private void SetMeterLink(string link)
         {
+            if (link != null) lastLinkViaPhone = link == "phone";
             if (meterLink == link) return;
             meterLink = link;
             // Checked once per stream, not on every reading.
