@@ -2812,7 +2812,9 @@ namespace Xm5ControlUi
                 if (!WindowIsShowing) return;
 
                 bool stateRefreshExpired = DateTime.UtcNow - lastStateRefreshAt >= TimeSpan.FromMilliseconds(AutoStateRefreshIntervalMs);
-                if (!ReferenceEquals(lastStateRefreshProfile, detection.Profile) || !lastStateRefreshConnected || stateRefreshExpired)
+                // Back from hidden, the settings may have changed meanwhile: read
+                // them now rather than when the next refresh is due.
+                if (!ReferenceEquals(lastStateRefreshProfile, detection.Profile) || !lastStateRefreshConnected || stateRefreshExpired || stateOutOfDate)
                 {
                     await RefreshCurrentStateQuietAsync(detection);
                 }
