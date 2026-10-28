@@ -1,17 +1,21 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <ws2bth.h>
 #include <bluetoothapis.h>
 #include <windows.h>
+#include <bcrypt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <wchar.h>
+#include <time.h>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "bthprops.lib")
+#pragma comment(lib, "bcrypt.lib")
 
 #define ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
 #define MDR_START 0x3e
@@ -92,9 +96,12 @@ static void print_usage(void) {
     puts("  xm5ctl anc");
     puts("  xm5ctl ambient 12");
     puts("  xm5ctl off");
+    puts("  xm5ctl pair HOST CODE   use the earbuds through the Android app on HOST");
+    puts("  xm5ctl unpair           stop using the phone");
     puts("");
-    puts("  any command also takes [--timeout MS] for replies and");
-    puts("                        [--connect-timeout MS] for opening the channel");
+    puts("  any command also takes [--timeout MS] for replies,");
+    puts("                        [--connect-timeout MS] for opening the channel,");
+    puts("                        [--direct] to skip the phone after pairing");
 }
 
 static void die_wsa(const char *what) {
@@ -355,6 +362,13 @@ static int parser_add(parser_t *parser, const uint8_t *bytes, size_t len, mdr_fr
 }
 
 static bool g_hex_dump = false;
+static bool g_direct = false; /* --direct: never through the phone */
+static bool g_via_phone = false; /* connected through the phone, not over Bluetooth */
+/* Through the phone, the ACK can take seconds: a dozing phone's Wi-Fi alone took up
+   to ~1 s per ping, and over 1.5 s for 4 requests in 70 (2026-10-27). Only the ACK
+   gets the longer wait. The reply follows it closely once the link is awake, and
+   replies that never come must not cost seconds on every refresh. */
+#define PHONE_ACK_TIMEOUT_MS 4000
 
 static const char *charging_text(uint8_t b) {
     switch (b) {
@@ -846,6 +860,7 @@ static int send_payload_seq(SOCKET s, const uint8_t *payload, size_t payload_len
     bool acked = !data_type_ack_required(data_type) || no_ack;
     int response_count = 0;
     DWORD start;
+    int ack_timeout_ms = g_via_phone && timeout_ms < PHONE_ACK_TIMEOUT_MS ? PHONE_ACK_TIMEOUT_MS : timeout_ms;
 
     if (!build_frame(data_type, tx_sequence, payload, payload_len, tx, sizeof(tx), &tx_len)) {
         fprintf(stderr, "Could not build frame.\n");
@@ -857,8 +872,8 @@ static int send_payload_seq(SOCKET s, const uint8_t *payload, size_t payload_len
     }
 
     start = GetTickCount();
-    while (!acked && (int)(GetTickCount() - start) < timeout_ms) {
-        int remaining = timeout_ms - (int)(GetTickCount() - start);
+    while (!acked && (int)(GetTickCount() - start) < ack_timeout_ms) {
+        int remaining = ack_timeout_ms - (int)(GetTickCount() - start);
         mdr_frame_t rx[8];
         int count = recv_frames(s, &parser, remaining > 50 ? remaining : 50, rx, (int)ARRAY_LEN(rx));
         if (count < 0) return -1;
@@ -1008,10 +1023,265 @@ static SOCKET connect_addr(BLUETOOTH_ADDRESS addr, const GUID *service_uuid, int
     return s;
 }
 
+/* Through the phone. The Android app (android-xm-control, docs/pc-phone-cooperation.md)
+   can share its own session with the earbuds: it listens on TCP port 47390 and, after
+   a one-line handshake, behaves exactly like the earbuds' RFCOMM channel - same frames,
+   same ACKs. So everything above works on the TCP socket unchanged, and the phone and
+   this PC can both use the earbuds at once. Paired with "xm5ctl pair HOST CODE", which
+   stores the phone's name and a key in %APPDATA%\xm5ctl\phone.txt. */
+
+#define PHONE_PORT "47390"
+/* Generous: the phone's Wi-Fi can take most of a second to wake, and falling back
+   to Bluetooth while the phone holds the earbuds takes them from it. */
+#define PHONE_CONNECT_MS 3000
+/* After the phone could not be reached, go straight to Bluetooth for this long, so a
+   phone that is away does not slow every job by PHONE_CONNECT_MS. */
+#define PHONE_SKIP_SECONDS 30
+
+typedef enum {
+    PHONE_OK,
+    PHONE_UNREACHABLE, /* not listening, or not there: use Bluetooth */
+    PHONE_NO_EARBUDS,  /* the phone can't reach them either: out of range, or its Bluetooth off */
+    PHONE_REFUSED      /* wrong key, or not paired any more */
+} phone_result_t;
+
+static bool phone_file(char *path, size_t len, const char *name) {
+    const char *appdata = getenv("APPDATA");
+    if (appdata == NULL) return false;
+    snprintf(path, len, "%s\\xm5ctl", appdata);
+    CreateDirectoryA(path, NULL);
+    snprintf(path, len, "%s\\xm5ctl\\%s", appdata, name);
+    return true;
+}
+
+static bool hex_to_bytes(const char *hex, uint8_t *out, size_t out_len) {
+    if (strlen(hex) < 2 * out_len) return false;
+    for (size_t i = 0; i < out_len; i++) {
+        unsigned int b;
+        if (sscanf(hex + 2 * i, "%2x", &b) != 1) return false;
+        out[i] = (uint8_t)b;
+    }
+    return true;
+}
+
+static void bytes_to_hex(const uint8_t *bytes, size_t len, char *out) {
+    for (size_t i = 0; i < len; i++) sprintf(out + 2 * i, "%02x", bytes[i]);
+}
+
+static bool load_phone(char *host, size_t host_len, uint8_t key[32]) {
+    char path[MAX_PATH];
+    char key_hex[80];
+    FILE *f;
+    bool ok;
+    if (!phone_file(path, sizeof(path), "phone.txt")) return false;
+    f = fopen(path, "r");
+    if (f == NULL) return false;
+    ok = fgets(host, (int)host_len, f) != NULL && fgets(key_hex, sizeof(key_hex), f) != NULL;
+    fclose(f);
+    if (!ok) return false;
+    host[strcspn(host, "\r\n")] = '\0';
+    return host[0] != '\0' && hex_to_bytes(key_hex, key, 32);
+}
+
+static bool hmac_sha256(const uint8_t *secret, size_t secret_len, const uint8_t *data, size_t data_len, uint8_t out[32]) {
+    BCRYPT_ALG_HANDLE alg = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    bool ok = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, BCRYPT_ALG_HANDLE_HMAC_FLAG) == 0 &&
+              BCryptCreateHash(alg, &hash, NULL, 0, (PUCHAR)secret, (ULONG)secret_len, 0) == 0 &&
+              BCryptHashData(hash, (PUCHAR)data, (ULONG)data_len, 0) == 0 &&
+              BCryptFinishHash(hash, out, 32, 0) == 0;
+    if (hash) BCryptDestroyHash(hash);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    return ok;
+}
+
+static SOCKET tcp_connect(const char *host, int connect_ms, int io_ms) {
+    struct addrinfo hints;
+    struct addrinfo *found = NULL;
+    SOCKET s = INVALID_SOCKET;
+
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    if (getaddrinfo(host, PHONE_PORT, &hints, &found) != 0) return INVALID_SOCKET;
+    for (struct addrinfo *a = found; a != NULL && s == INVALID_SOCKET; a = a->ai_next) {
+        u_long nonblocking = 1;
+        u_long blocking = 0;
+        fd_set writefds;
+        fd_set exceptfds;
+        struct timeval tv;
+        DWORD ms = (DWORD)io_ms;
+        BOOL nodelay = TRUE;
+
+        s = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+        if (s == INVALID_SOCKET) continue;
+        ioctlsocket(s, FIONBIO, &nonblocking);
+        connect(s, a->ai_addr, (int)a->ai_addrlen);
+        FD_ZERO(&writefds);
+        FD_ZERO(&exceptfds);
+        FD_SET(s, &writefds);
+        FD_SET(s, &exceptfds);
+        tv.tv_sec = connect_ms / 1000;
+        tv.tv_usec = (connect_ms % 1000) * 1000;
+        if (select(0, NULL, &writefds, &exceptfds, &tv) <= 0 || !FD_ISSET(s, &writefds)) {
+            closesocket(s);
+            s = INVALID_SOCKET;
+            continue;
+        }
+        ioctlsocket(s, FIONBIO, &blocking);
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof(ms));
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&ms, sizeof(ms));
+        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
+    }
+    freeaddrinfo(found);
+    return s;
+}
+
+/* One handshake line, a byte at a time so none of the frames after it are taken. */
+static bool read_phone_line(SOCKET s, char *line, size_t len) {
+    size_t n = 0;
+    while (n + 1 < len) {
+        char c;
+        if (recv(s, &c, 1, 0) != 1) return false;
+        if (c == '\n') break;
+        if (c != '\r') line[n++] = c;
+    }
+    line[n] = '\0';
+    return true;
+}
+
+/* Connects and proves this PC to the phone with [secret]: the stored key for "AUTH",
+   or the code the phone shows for "PAIR". A KEY line, which only follows PAIR, is
+   copied to [key_hex_out]. Returns the socket ready for frames, or INVALID_SOCKET. */
+static SOCKET phone_handshake(const char *host, const char *kind, const uint8_t *secret, size_t secret_len,
+                              int io_ms, char *key_hex_out, phone_result_t *result) {
+    char line[200];
+    uint8_t nonce[16];
+    uint8_t proof[32];
+    char proof_hex[65];
+    SOCKET s = tcp_connect(host, PHONE_CONNECT_MS, io_ms);
+
+    *result = PHONE_UNREACHABLE;
+    if (s == INVALID_SOCKET) return INVALID_SOCKET;
+    if (!read_phone_line(s, line, sizeof(line)) || strncmp(line, "XMCTL1 ", 7) != 0 ||
+        !hex_to_bytes(line + 7, nonce, sizeof(nonce)) || !hmac_sha256(secret, secret_len, nonce, sizeof(nonce), proof)) {
+        closesocket(s);
+        return INVALID_SOCKET;
+    }
+    bytes_to_hex(proof, sizeof(proof), proof_hex);
+    snprintf(line, sizeof(line), "%s %s\n", kind, proof_hex);
+    if (!send_all(s, (const uint8_t *)line, strlen(line))) {
+        closesocket(s);
+        return INVALID_SOCKET;
+    }
+    while (read_phone_line(s, line, sizeof(line))) {
+        if (strncmp(line, "KEY ", 4) == 0 && key_hex_out != NULL) {
+            strncpy(key_hex_out, line + 4, 64);
+            key_hex_out[64] = '\0';
+        } else if (strcmp(line, "OK") == 0) {
+            *result = PHONE_OK;
+            return s;
+        } else if (strncmp(line, "NO ", 3) == 0) {
+            fprintf(stderr, "The phone refused: %s\n", line + 3);
+            *result = strcmp(line + 3, "earbuds not connected") == 0 ? PHONE_NO_EARBUDS : PHONE_REFUSED;
+            break;
+        }
+    }
+    closesocket(s);
+    return INVALID_SOCKET;
+}
+
+static bool phone_skipped(void) {
+    char path[MAX_PATH];
+    FILE *f;
+    long long until = 0;
+    if (!phone_file(path, sizeof(path), "phone-skip.txt")) return false;
+    f = fopen(path, "r");
+    if (f == NULL) return false;
+    if (fscanf(f, "%lld", &until) != 1) until = 0;
+    fclose(f);
+    return (long long)time(NULL) < until;
+}
+
+static void skip_phone(void) {
+    char path[MAX_PATH];
+    FILE *f;
+    if (!phone_file(path, sizeof(path), "phone-skip.txt")) return;
+    f = fopen(path, "w");
+    if (f == NULL) return;
+    fprintf(f, "%lld\n", (long long)time(NULL) + PHONE_SKIP_SECONDS);
+    fclose(f);
+}
+
+/* Through the phone when paired and not skipped; INVALID_SOCKET means use Bluetooth.
+   The phone may connect to the earbuds itself before answering, so the handshake
+   waits as long as an RFCOMM connect. */
+static SOCKET connect_phone(int connect_timeout_ms) {
+    char host[256];
+    uint8_t key[32];
+    phone_result_t result;
+    SOCKET s;
+
+    if (g_direct || !load_phone(host, sizeof(host), key) || phone_skipped()) return INVALID_SOCKET;
+    s = phone_handshake(host, "AUTH", key, sizeof(key), connect_timeout_ms, NULL, &result);
+    if (result == PHONE_OK) return s;
+    /* Whatever the reason, Bluetooth next. When the phone has no earbuds it has
+       already tried to connect to them and failed, so they are free; once it reaches
+       them again it takes them back, and the next job here goes through it. */
+    if (result == PHONE_UNREACHABLE) fprintf(stderr, "The phone did not answer; using Bluetooth.\n");
+    if (result == PHONE_NO_EARBUDS) fprintf(stderr, "The phone has no connection to the earbuds; using Bluetooth.\n");
+    skip_phone();
+    return INVALID_SOCKET;
+}
+
+static int invoke_pair(const char *host, const char *code) {
+    char key_hex[65] = "";
+    char path[MAX_PATH];
+    uint8_t key[32];
+    phone_result_t result;
+    FILE *f;
+    SOCKET s = phone_handshake(host, "PAIR", (const uint8_t *)code, strlen(code), 15000, key_hex, &result);
+
+    if (s != INVALID_SOCKET) closesocket(s);
+    if (result == PHONE_UNREACHABLE && key_hex[0] == '\0') {
+        fprintf(stderr, "Could not reach the phone at %s, port %s.\n", host, PHONE_PORT);
+        return 1;
+    }
+    /* A KEY line means paired, even if the phone then has no earbuds to offer. */
+    if (!hex_to_bytes(key_hex, key, sizeof(key))) return 1;
+    if (!phone_file(path, sizeof(path), "phone.txt") || (f = fopen(path, "w")) == NULL) {
+        fprintf(stderr, "Could not save the pairing.\n");
+        return 1;
+    }
+    fprintf(f, "%s\n%s\n", host, key_hex);
+    fclose(f);
+    if (phone_file(path, sizeof(path), "phone-skip.txt")) DeleteFileA(path);
+    printf("paired with %s\n", host);
+    return 0;
+}
+
+static int invoke_unpair(void) {
+    char path[MAX_PATH];
+    if (phone_file(path, sizeof(path), "phone.txt")) DeleteFileA(path);
+    if (phone_file(path, sizeof(path), "phone-skip.txt")) DeleteFileA(path);
+    puts("unpaired");
+    return 0;
+}
+
 static SOCKET connect_best(const char *name_filter, int timeout_ms, wchar_t *selected_name, size_t selected_name_len) {
     bt_device_t devices[MAX_DEVICES];
-    int count = enumerate_devices(devices, MAX_DEVICES);
+    int count;
+    SOCKET phone = connect_phone(timeout_ms);
 
+    if (phone != INVALID_SOCKET) {
+        g_via_phone = true;
+        wcsncpy(selected_name, L"the earbuds through the phone", selected_name_len - 1);
+        selected_name[selected_name_len - 1] = L'\0';
+        return phone;
+    }
+
+    count = enumerate_devices(devices, MAX_DEVICES);
     connect_in_use = false;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < count; i++) {
@@ -1180,6 +1450,8 @@ static bool parse_options(int argc, char **argv, options_t *opt) {
         } else if (strcmp(argv[i], "--battery-every") == 0 && i + 1 < argc) {
             opt->battery_every = atoi(argv[++i]);
             if (opt->battery_every < 1) opt->battery_every = 1;
+        } else if (strcmp(argv[i], "--direct") == 0) {
+            g_direct = true;
         } else if (strcmp(argv[i], "--safe-listening-every") == 0 && i + 1 < argc) {
             opt->safe_listening_every = atoi(argv[++i]);
             if (opt->safe_listening_every < 0) opt->safe_listening_every = 0;
@@ -1813,6 +2085,20 @@ int main(int argc, char **argv) {
     WSADATA wsa;
     options_t opt;
     int rc = 0;
+
+    if (argc >= 2 && (strcmp(argv[1], "pair") == 0 || strcmp(argv[1], "unpair") == 0)) {
+        if (strcmp(argv[1], "pair") == 0 && argc != 4) {
+            print_usage();
+            return 2;
+        }
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+            die_wsa("WSAStartup");
+            return 1;
+        }
+        rc = strcmp(argv[1], "pair") == 0 ? invoke_pair(argv[2], argv[3]) : invoke_unpair();
+        WSACleanup();
+        return rc;
+    }
 
     if (!parse_options(argc, argv, &opt)) {
         print_usage();
