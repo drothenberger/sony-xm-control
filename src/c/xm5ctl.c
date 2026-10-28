@@ -720,6 +720,17 @@ static void print_known_payload(const mdr_frame_t *frame) {
     }
 
     /*
+     * FE 01 comes from the Android app's PC link, not from the earbuds: the
+     * phone saying a setting changed there and is worth reading again. The
+     * earbuds' own frames all start with an odd byte, so this one cannot be
+     * mistaken for a reply that is being waited for.
+     */
+    if (p[0] == 0xfe && n == 2 && p[1] == 0x01 && frame->data_type == 0x0c) {
+        puts("phone: changed");
+        return;
+    }
+
+    /*
      * 0x5b covers a whole family; inquired type 0x03 is the sound pressure
      * meter and 0x00 is the equalizer band layout, which the caller reads off
      * the raw payload line below.

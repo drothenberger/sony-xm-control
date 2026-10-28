@@ -328,6 +328,9 @@ namespace Xm5ControlUi
         private const int AutoDetectIntervalMs = 4000;
         private const int AutoStateRefreshIntervalMs = 15000;
         private const int LiveEqDebounceMs = 260;
+        // The phone sends one "changed" per setting it saw change, so a preset
+        // tapped through several in a row arrives as a burst.
+        private const int PhoneChangeDebounceMs = 300;
         // Comfortably longer than the debounce above, so the window between the
         // last slider move and the write leaving is covered too.
         private const int EqEditOwnsSlidersMs = 2000;
@@ -454,6 +457,7 @@ namespace Xm5ControlUi
         private readonly System.Windows.Forms.Timer autoDetectTimer;
         private readonly System.Windows.Forms.Timer liveEqTimer;
         private readonly System.Windows.Forms.Timer meterSupervisorTimer;
+        private readonly System.Windows.Forms.Timer phoneChangeTimer;
 
         private DeviceProfile currentProfile;
         private DeviceProfile lastStateRefreshProfile;
@@ -805,6 +809,12 @@ namespace Xm5ControlUi
                 if (IsClosing) return;
                 liveEqTimer.Stop();
                 await FlushLiveEqualizerAsync();
+            });
+            phoneChangeTimer = new System.Windows.Forms.Timer { Interval = PhoneChangeDebounceMs };
+            phoneChangeTimer.Tick += async (s, e) => await RunUiTaskAsync(async () =>
+            {
+                phoneChangeTimer.Stop();
+                await RefreshAfterPhoneChangeAsync();
             });
 
             Resize += (s, e) =>
@@ -2817,6 +2827,34 @@ namespace Xm5ControlUi
             }
         }
 
+        // The same refresh the detect tick runs every 15 s, brought forward. It
+        // runs under the same conditions, and resets that 15 s count when it
+        // does.
+        private async Task RefreshAfterPhoneChangeAsync()
+        {
+            if (IsClosing) return;
+            // Coming back reads everything anyway, and a lost connection is the
+            // detect tick's to sort out.
+            if (!WindowIsShowing || !lastStateRefreshConnected) return;
+            // Something of this app's own is under way. The change is not lost:
+            // try again once it is out of the way.
+            if (commandBusy || autoDetectRunning || EqualizerEditInFlight())
+            {
+                phoneChangeTimer.Start();
+                return;
+            }
+
+            autoDetectRunning = true;
+            try
+            {
+                await RefreshCurrentStateQuietAsync(null);
+            }
+            finally
+            {
+                autoDetectRunning = false;
+            }
+        }
+
         private async Task<DetectAttempt> DetectProfileAsync(bool quiet)
         {
             var output = quiet ? await RunBackendQuietAsync("scan") : await RunBackendAsync("scan", "Detecting device");
@@ -3215,6 +3253,16 @@ namespace Xm5ControlUi
             if (line.StartsWith("Connecting to ", StringComparison.Ordinal))
             {
                 SetMeterLink(line.Contains("through the phone") ? "phone" : "Bluetooth");
+                return;
+            }
+
+            // The Android app says a setting changed there. The earbuds answer
+            // most changes only to the app that made them, so without this the
+            // window would show it at the next 15 s refresh at the earliest.
+            if (line == "phone: changed")
+            {
+                phoneChangeTimer.Stop();
+                phoneChangeTimer.Start();
                 return;
             }
 
@@ -5106,6 +5154,10 @@ namespace Xm5ControlUi
             {
                 liveEqTimer.Stop();
             }
+            if (phoneChangeTimer != null)
+            {
+                phoneChangeTimer.Stop();
+            }
             if (meterSupervisorTimer != null)
             {
                 meterSupervisorTimer.Stop();
@@ -5154,6 +5206,7 @@ namespace Xm5ControlUi
 
             if (autoDetectTimer != null) autoDetectTimer.Dispose();
             if (liveEqTimer != null) liveEqTimer.Dispose();
+            if (phoneChangeTimer != null) phoneChangeTimer.Dispose();
             if (meterSupervisorTimer != null) meterSupervisorTimer.Dispose();
             if (trayIcon != null)
             {
