@@ -185,21 +185,26 @@ static int enumerate_devices(bt_device_t *devices, int max_devices) {
     return count;
 }
 
-static void list_devices(const char *name_filter) {
-    bt_device_t devices[MAX_DEVICES];
-    int count = enumerate_devices(devices, MAX_DEVICES);
-
+/* [phone_addr], when not empty, is the address of earbuds the phone holds (see
+   invoke_scan): that device is listed as connected, "(through the phone)". */
+static void list_devices(const bt_device_t *devices, int count, const char *name_filter, const char *phone_addr) {
     printf("%-6s %-6s %-6s %-17s %ls\n", "Conn", "Auth", "Rem", "Address", L"Name");
     for (int i = 0; i < count; i++) {
+        char addr[18];
+        bool via_phone;
         if (!wide_contains_ascii(devices[i].name, name_filter)) {
             continue;
         }
-        printf("%-6s %-6s %-6s ",
-            devices[i].connected ? "yes" : "no",
+        snprintf(addr, sizeof(addr), "%02X:%02X:%02X:%02X:%02X:%02X",
+            devices[i].addr.rgBytes[5], devices[i].addr.rgBytes[4], devices[i].addr.rgBytes[3],
+            devices[i].addr.rgBytes[2], devices[i].addr.rgBytes[1], devices[i].addr.rgBytes[0]);
+        via_phone = !devices[i].connected && phone_addr[0] != '\0' && _stricmp(addr, phone_addr) == 0;
+        printf("%-6s %-6s %-6s %s",
+            devices[i].connected || via_phone ? "yes" : "no",
             devices[i].authenticated ? "yes" : "no",
-            devices[i].remembered ? "yes" : "no");
-        print_addr(devices[i].addr);
-        wprintf(L" %ls\n", devices[i].name);
+            devices[i].remembered ? "yes" : "no",
+            addr);
+        wprintf(L" %ls%ls\n", devices[i].name, via_phone ? L" (through the phone)" : L"");
     }
 }
 
@@ -1038,6 +1043,9 @@ static SOCKET connect_addr(BLUETOOTH_ADDRESS addr, const GUID *service_uuid, int
    phone that is away does not slow every job by PHONE_CONNECT_MS. */
 #define PHONE_SKIP_SECONDS 30
 
+/* The earbuds' address from the phone's last "OK", or empty. */
+static char g_phone_earbuds[32];
+
 typedef enum {
     PHONE_OK,
     PHONE_UNREACHABLE, /* not listening, or not there: use Bluetooth */
@@ -1179,7 +1187,9 @@ static SOCKET phone_handshake(const char *host, const char *kind, const uint8_t 
         if (strncmp(line, "KEY ", 4) == 0 && key_hex_out != NULL) {
             strncpy(key_hex_out, line + 4, 64);
             key_hex_out[64] = '\0';
-        } else if (strcmp(line, "OK") == 0) {
+        } else if (strcmp(line, "OK") == 0 || strncmp(line, "OK ", 3) == 0) {
+            /* "OK <address>": the earbuds the phone holds, for invoke_scan. */
+            snprintf(g_phone_earbuds, sizeof(g_phone_earbuds), "%s", line[2] ? line + 3 : "");
             *result = PHONE_OK;
             return s;
         } else if (strncmp(line, "NO ", 3) == 0) {
@@ -1259,6 +1269,48 @@ static int invoke_pair(const char *host, const char *code) {
     if (phone_file(path, sizeof(path), "phone-skip.txt")) DeleteFileA(path);
     printf("paired with %s\n", host);
     return 0;
+}
+
+/* Lists the paired devices. When the earbuds are not connected to this PC but the
+   phone holds them, they are listed as connected "(through the phone)": the UI decides
+   from the scan whether there is a headset to talk to, and through the phone there is,
+   even while it plays nothing from this PC.
+
+   Which device the earbuds are comes from the phone ("OK <address>"), remembered in
+   earbuds.txt so that the phone is only asked while they are not connected here. The
+   address matters: "is anything connected" would be answered by the phone itself,
+   which is usually connected to this PC too. */
+static void invoke_scan(const char *name_filter) {
+    bt_device_t devices[MAX_DEVICES];
+    int count = enumerate_devices(devices, MAX_DEVICES);
+    char path[MAX_PATH];
+    char known[32] = "";
+    bool connected_here = false;
+    FILE *f;
+
+    if (phone_file(path, sizeof(path), "earbuds.txt") && (f = fopen(path, "r")) != NULL) {
+        if (fgets(known, sizeof(known), f) == NULL) known[0] = '\0';
+        known[strcspn(known, "\r\n")] = '\0';
+        fclose(f);
+    }
+    for (int i = 0; i < count && known[0] != '\0'; i++) {
+        char addr[18];
+        snprintf(addr, sizeof(addr), "%02X:%02X:%02X:%02X:%02X:%02X",
+            devices[i].addr.rgBytes[5], devices[i].addr.rgBytes[4], devices[i].addr.rgBytes[3],
+            devices[i].addr.rgBytes[2], devices[i].addr.rgBytes[1], devices[i].addr.rgBytes[0]);
+        if (devices[i].connected && _stricmp(addr, known) == 0) connected_here = true;
+    }
+    g_phone_earbuds[0] = '\0';
+    if (!connected_here) {
+        SOCKET s = connect_phone(5000);
+        if (s != INVALID_SOCKET) closesocket(s);
+        if (g_phone_earbuds[0] != '\0' && _stricmp(g_phone_earbuds, known) != 0 &&
+            (f = fopen(path, "w")) != NULL) {
+            fprintf(f, "%s\n", g_phone_earbuds);
+            fclose(f);
+        }
+    }
+    list_devices(devices, count, name_filter, g_phone_earbuds);
 }
 
 static int invoke_unpair(void) {
@@ -2116,7 +2168,7 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(opt.action, "scan") == 0) {
-        list_devices(opt.name_filter);
+        invoke_scan(opt.name_filter);
     } else if (strcmp(opt.action, "battery") == 0) {
         const uint8_t payload[] = { 0x22, 0x00 };
         rc = invoke_payload(&opt, payload, sizeof(payload), 0x0c, 0x23);
