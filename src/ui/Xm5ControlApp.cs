@@ -514,6 +514,7 @@ namespace Xm5ControlUi
         private string trayIconTextDrawn;
         private bool trayIconDimDrawn;
         private bool trayIconPausedDrawn;
+        private bool trayIconDirectDrawn;
         private bool trayIconApplied;
         private string trayTooltipApplied;
         // The last battery levels, kept in two parts because the meter stream
@@ -571,9 +572,13 @@ namespace Xm5ControlUi
         // being reported: a bud went into the case.
         private bool codecStale;
         private string activeDeviceText;
-        // The meter stream reached the headset through the Android app, not over
-        // this PC's Bluetooth. Shown beside the codec and in the tray tooltip.
-        private bool meterViaPhone;
+        // How the running meter stream reached the headset: "phone" through the
+        // Android app's PC link, "Bluetooth" over this PC's own; null with no
+        // stream. Shown in the tray tooltip, beside the codec, and on the icon.
+        private string meterLink;
+        // On Bluetooth although paired with the phone (xm5ctl pair): the exception
+        // the icon marks. Without a pairing, Bluetooth is simply normal.
+        private bool meterDirectMarked;
         private readonly Dictionary<int, string> deviceSlotNames = new Dictionary<int, string>();
         private Label soundPressureLabel;
         private Label soundPressureCaption;
@@ -2072,7 +2077,9 @@ namespace Xm5ControlUi
 
         private string TrayTitle()
         {
-            string title = AppTitle();
+            // Right after the name, since that survives every shortening below.
+            string head = AppTitle() + (meterLink == null ? "" : " via " + meterLink);
+            string title = head;
             if (TrayMeterPausedNow)
             {
                 title += " - paused";
@@ -2098,7 +2105,6 @@ namespace Xm5ControlUi
                     // which the icon cannot say in three characters.
                     : trayMeterDigits == SafeListeningOffText ? " - Safe Listening is off"
                     : " - " + trayMeterDigits + " dB";
-                if (meterViaPhone) title += " via phone";
                 // The icon says this by dimming; the tooltip has room to say it
                 // in words, and a number nobody flagged as stopped is the one
                 // thing here that could be read as current when it is not.
@@ -2130,9 +2136,10 @@ namespace Xm5ControlUi
                 foreach (string line in new[]
                 {
                     title + "\n" + battery + more + suffix,
-                    AppTitle() + "\n" + battery + more + suffix,
+                    head + "\n" + battery + more + suffix,
                     title + "\n" + buds + more + suffix,
-                    AppTitle() + "\n" + buds + more + suffix,
+                    head + "\n" + buds + more + suffix,
+                    head + "\n" + buds + suffix,
                     AppTitle() + "\n" + buds + suffix,
                 })
                 {
@@ -3192,7 +3199,7 @@ namespace Xm5ControlUi
             if (meterProcess == null) return;
             StopMeterStream();
             // Not known again until the next stream says how it connected.
-            SetMeterViaPhone(false);
+            SetMeterLink(null);
             // Only an unplanned exit earns a pause before reconnecting. A stop
             // made to let a command through should be picked straight back up.
             meterStreamFailedAt = DateTime.UtcNow;
@@ -3207,7 +3214,7 @@ namespace Xm5ControlUi
             // the Android app's PC link, or over this PC's own Bluetooth.
             if (line.StartsWith("Connecting to ", StringComparison.Ordinal))
             {
-                SetMeterViaPhone(line.Contains("through the phone"));
+                SetMeterLink(line.Contains("through the phone") ? "phone" : "Bluetooth");
                 return;
             }
 
@@ -3315,8 +3322,9 @@ namespace Xm5ControlUi
             string text = trayMeterEnabled ? trayMeterDigits : null;
             bool dim = trayMeterDigitsDim;
             Color digits = TrayDigitsColor(dim);
+            bool direct = meterDirectMarked;
             if (trayIconApplied && paused == trayIconPausedDrawn && text == trayIconTextDrawn &&
-                (text == null || (dim == trayIconDimDrawn && digits == trayIconColorDrawn))) return;
+                (text == null || (dim == trayIconDimDrawn && digits == trayIconColorDrawn && direct == trayIconDirectDrawn))) return;
 
             if (text == null && !paused)
             {
@@ -3334,7 +3342,7 @@ namespace Xm5ControlUi
                     rendered = paused
                         ? RenderPausedIcon(Color.FromArgb(226, 230, 235))
                         : RenderDigitsIcon(text, digits,
-                            digits == TrayBatteryLowColor || digits == TrayBatteryCriticalColor);
+                            digits == TrayBatteryLowColor || digits == TrayBatteryCriticalColor, direct);
                 }
                 catch
                 {
@@ -3353,6 +3361,7 @@ namespace Xm5ControlUi
             trayIconDimDrawn = dim;
             trayIconColorDrawn = digits;
             trayIconPausedDrawn = paused;
+            trayIconDirectDrawn = direct;
             trayIconApplied = true;
         }
 
@@ -3528,19 +3537,23 @@ namespace Xm5ControlUi
                 return;
             }
             codecLabel.Text = (activeDeviceText == null ? codecText : codecText + " from " + activeDeviceText) +
-                (meterViaPhone ? " · through the phone" : "");
+                (meterLink == "phone" ? " · through the phone" : "");
             // Dimmed, as the meter is, for a value no longer being refreshed:
             // the source can still change while the bud is docked.
             codecLabel.ForeColor = codecStale ? faint : subdued;
         }
 
-        // Whether the meter stream reaches the headset through the phone. Only the
-        // stream is followed: it runs all the time, while other jobs are brief.
-        private void SetMeterViaPhone(bool viaPhone)
+        // Only the meter stream is followed: it runs all the time, while other
+        // jobs are brief.
+        private void SetMeterLink(string link)
         {
-            if (meterViaPhone == viaPhone) return;
-            meterViaPhone = viaPhone;
+            if (meterLink == link) return;
+            meterLink = link;
+            // Checked once per stream, not on every reading.
+            meterDirectMarked = link == "Bluetooth" && File.Exists(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xm5ctl", "phone.txt"));
             ShowCodecRow();
+            ApplyTrayIcon();
             ApplyTrayTooltip();
         }
 
@@ -5418,12 +5431,19 @@ namespace Xm5ControlUi
         // white to a red/green colour blind user, so the warning needs a shape that
         // is there or not whatever colour it is seen as. The digits give up
         // the bar's height only while it is shown.
-        private static Icon RenderDigitsIcon(string text, Color color, bool batteryBar)
+        //
+        // A short dash along the top marks the meter running over this PC's own
+        // Bluetooth, the exception once the Android app shares its connection:
+        // the usual state stays unmarked, so the icon changes when it is not.
+        // Short and on top, it cannot pass for the battery bar.
+        private static Icon RenderDigitsIcon(string text, Color color, bool batteryBar, bool directMark)
         {
             var bitmap = new Bitmap(32, 32);
             try
             {
-                var box = batteryBar ? new RectangleF(1f, 0f, 30f, 24f) : new RectangleF(1f, 1f, 30f, 30f);
+                float top = directMark ? 6f : (batteryBar ? 0f : 1f);
+                float bottom = batteryBar ? 24f : 31f;
+                var box = new RectangleF(1f, top, 30f, bottom - top);
                 using (var g = Graphics.FromImage(bitmap))
                 using (var brush = new SolidBrush(color))
                 using (var format = new StringFormat(StringFormat.GenericTypographic))
@@ -5432,6 +5452,7 @@ namespace Xm5ControlUi
                     g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                     g.Clear(Color.Transparent);
                     if (batteryBar) FillRound(g, brush, new Rectangle(2, 25, 28, 6), 2);
+                    if (directMark) FillRound(g, brush, new Rectangle(11, 0, 10, 5), 2);
                     format.Alignment = StringAlignment.Center;
                     format.LineAlignment = StringAlignment.Center;
                     using (var font = FitFont(g, text, box.Width, box.Height, format))
