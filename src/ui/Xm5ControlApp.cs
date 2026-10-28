@@ -571,6 +571,9 @@ namespace Xm5ControlUi
         // being reported: a bud went into the case.
         private bool codecStale;
         private string activeDeviceText;
+        // The meter stream reached the headset through the Android app, not over
+        // this PC's Bluetooth. Shown beside the codec and in the tray tooltip.
+        private bool meterViaPhone;
         private readonly Dictionary<int, string> deviceSlotNames = new Dictionary<int, string>();
         private Label soundPressureLabel;
         private Label soundPressureCaption;
@@ -2095,6 +2098,7 @@ namespace Xm5ControlUi
                     // which the icon cannot say in three characters.
                     : trayMeterDigits == SafeListeningOffText ? " - Safe Listening is off"
                     : " - " + trayMeterDigits + " dB";
+                if (meterViaPhone) title += " via phone";
                 // The icon says this by dimming; the tooltip has room to say it
                 // in words, and a number nobody flagged as stopped is the one
                 // thing here that could be read as current when it is not.
@@ -3187,6 +3191,8 @@ namespace Xm5ControlUi
             // about whether anything is playing.
             if (meterProcess == null) return;
             StopMeterStream();
+            // Not known again until the next stream says how it connected.
+            SetMeterViaPhone(false);
             // Only an unplanned exit earns a pause before reconnecting. A stop
             // made to let a command through should be picked straight back up.
             meterStreamFailedAt = DateTime.UtcNow;
@@ -3196,6 +3202,14 @@ namespace Xm5ControlUi
         private void OnMeterLine(string line)
         {
             if (IsClosing || string.IsNullOrEmpty(line)) return;
+
+            // The stream's first line says how it reached the headset: through
+            // the Android app's PC link, or over this PC's own Bluetooth.
+            if (line.StartsWith("Connecting to ", StringComparison.Ordinal))
+            {
+                SetMeterViaPhone(line.Contains("through the phone"));
+                return;
+            }
 
             // Battery rides along on the same stream; see MeterStreamBatteryEvery.
             if (Regex.IsMatch(line, @"^(case )?battery:", RegexOptions.IgnoreCase))
@@ -3513,10 +3527,21 @@ namespace Xm5ControlUi
                 if (codecStale) codecLabel.Text = "Not reported while a bud is docked";
                 return;
             }
-            codecLabel.Text = activeDeviceText == null ? codecText : codecText + " from " + activeDeviceText;
+            codecLabel.Text = (activeDeviceText == null ? codecText : codecText + " from " + activeDeviceText) +
+                (meterViaPhone ? " · through the phone" : "");
             // Dimmed, as the meter is, for a value no longer being refreshed:
             // the source can still change while the bud is docked.
             codecLabel.ForeColor = codecStale ? faint : subdued;
+        }
+
+        // Whether the meter stream reaches the headset through the phone. Only the
+        // stream is followed: it runs all the time, while other jobs are brief.
+        private void SetMeterViaPhone(bool viaPhone)
+        {
+            if (meterViaPhone == viaPhone) return;
+            meterViaPhone = viaPhone;
+            ShowCodecRow();
+            ApplyTrayTooltip();
         }
 
         // Takes either a whole state batch or a single line from the meter
