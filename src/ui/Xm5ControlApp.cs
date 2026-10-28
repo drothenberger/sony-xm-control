@@ -415,7 +415,7 @@ namespace Xm5ControlUi
         private const int BackendCommandPaceMs = 450;
         // 36 02 is the paired-device list, and it is the one read here that lives
         // on DATA_MDR_NO2 rather than DATA_MDR.
-        private const string StateBatchTail = "D6 D1;D6 D2;52 00;56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05;mdr2:36 02\"";
+        private const string StateBatchTail = "56 00;5A 00;E6 01;E6 00;F6 02;F6 01;26 05;mdr2:36 02\"";
 
         // 66 19 is the WF-1000XM6 noise control state; 66 17 covers older models.
         // Which one a model answers is a protocol capability rather than a form
@@ -435,7 +435,12 @@ namespace Xm5ControlUi
             // F0 06 asks whether the headset has the ear tip seal test. Only
             // until that is settled, for the same reason as the NCASM pair.
             string sealTest = sealTestSupported.HasValue ? "" : "F0 06;";
-            return "batch \"" + battery + "12 00;" + ncasm + sealTest + StateBatchTail;
+            // 52 00 is the bare equalizer on/off flag, read for models whose
+            // full equalizer state (56 00) does not answer. The WF-1000XM6
+            // never answers it, which cost the whole reply timeout on every
+            // refresh, so it is dropped once 56 00 has answered with bands.
+            string eqFlag = eqStateAnswered ? "" : "52 00;";
+            return "batch \"" + battery + "12 00;" + ncasm + sealTest + "D6 D1;D6 D2;" + eqFlag + StateBatchTail;
         }
 
         // The battery queries worth asking on the meter stream. Earbuds skip the
@@ -662,6 +667,7 @@ namespace Xm5ControlUi
         private bool updatingNoiseUi;
         private int ncasmTypeSeen;
         private int ncasm17AloneCount;
+        private bool eqStateAnswered;
         private PillButton ancButton;
         private PillButton ambientButton;
         private PillButton offButton;
@@ -2740,12 +2746,13 @@ namespace Xm5ControlUi
             if (profile == null) return false;
             bool changed = !ReferenceEquals(currentProfile, profile);
             currentProfile = profile;
-            // Which NCASM inquired type answers is a property of the device, so a
-            // different one has to prove it again.
+            // Which NCASM inquired type and which equalizer read answer are
+            // properties of the device, so a different one has to prove them again.
             if (changed)
             {
                 ncasmTypeSeen = 0;
                 ncasm17AloneCount = 0;
+                eqStateAnswered = false;
             }
             // A run is one headset's battery going down.
             if (changed) drainEstimate.Reset();
@@ -3897,6 +3904,7 @@ namespace Xm5ControlUi
             if (TryParseEqualizerState(output, out eqPreset, out eqValues))
             {
                 AdoptEqLayoutFromState(eqValues);
+                if (HasEqValues(eqValues)) eqStateAnswered = true;
                 if (HasEqValues(eqValues) && !EqualizerEditInFlight())
                 {
                     UpdateEqualizerUi(eqPreset, eqValues);
