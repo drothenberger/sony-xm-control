@@ -724,9 +724,17 @@ static void print_known_payload(const mdr_frame_t *frame) {
      * phone saying a setting changed there and is worth reading again. The
      * earbuds' own frames all start with an odd byte, so this one cannot be
      * mistaken for a reply that is being waited for.
+     *
+     * FE 01 <n> then n pairs names what changed, each by the first two bytes
+     * of the write that changed it. Bare, or not that shape, it means read
+     * everything.
      */
-    if (p[0] == 0xfe && n == 2 && p[1] == 0x01 && frame->data_type == 0x0c) {
-        puts("phone: changed");
+    if (p[0] == 0xfe && n >= 2 && p[1] == 0x01 && frame->data_type == 0x0c) {
+        fputs("phone: changed", stdout);
+        if (n >= 3 && n == 3 + 2 * (size_t)p[2]) {
+            for (size_t i = 3; i < n; i++) printf(" %02X", p[i]);
+        }
+        putchar('\n');
         return;
     }
 

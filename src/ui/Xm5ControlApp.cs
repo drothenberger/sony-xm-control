@@ -458,6 +458,9 @@ namespace Xm5ControlUi
         private readonly System.Windows.Forms.Timer liveEqTimer;
         private readonly System.Windows.Forms.Timer meterSupervisorTimer;
         private readonly System.Windows.Forms.Timer phoneChangeTimer;
+        // What the phone has named since the last read it caused.
+        private readonly HashSet<string> phoneChangeReads = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private bool phoneChangeNeedsAll;
 
         private DeviceProfile currentProfile;
         private DeviceProfile lastStateRefreshProfile;
@@ -2829,15 +2832,64 @@ namespace Xm5ControlUi
             }
         }
 
-        // The same refresh the detect tick runs every 15 s, brought forward. It
-        // runs under the same conditions, and resets that 15 s count when it
-        // does.
+        // The phone names each change by the first two bytes of the write that
+        // made it. Each maps to the read that shows that setting here; through
+        // the phone one read costs 0.1-0.5 s and the whole state batch 2-13 s.
+        // Anything not listed gets the whole batch.
+        private static readonly Dictionary<string, string> PhoneChangeReads = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "58 00", "56 00" },
+            { "58 04", "56 00" },
+            { "68 19", "66 19" },
+            { "68 17", "66 17" },
+            { "F8 01", "F6 01" },
+            { "F8 02", "F6 02" },
+            { "D8 D1", "D6 D1" },
+            { "D8 D2", "D6 D2" },
+            { "28 05", "26 05" },
+            { "E8 01", "E6 01" },
+            // Connection quality is best read from the device information,
+            // with E7 00 as the fallback, as in the state batch.
+            { "E8 00", "12 00;E6 00" },
+        };
+
+        // Changes to things this window does not show: playback and volume.
+        private static readonly HashSet<string> PhoneChangesIgnored = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "A4 01",
+            "A8 20",
+        };
+
+        private void NotePhoneChange(string named)
+        {
+            var pairs = Regex.Matches(named, @"([0-9A-F]{2}) ([0-9A-F]{2})", RegexOptions.IgnoreCase);
+            if (pairs.Count == 0) phoneChangeNeedsAll = true;
+            foreach (Match pair in pairs)
+            {
+                string write = pair.Value.ToUpperInvariant();
+                string read;
+                if (PhoneChangeReads.TryGetValue(write, out read)) phoneChangeReads.Add(read);
+                else if (!PhoneChangesIgnored.Contains(write)) phoneChangeNeedsAll = true;
+            }
+            if (!phoneChangeNeedsAll && phoneChangeReads.Count == 0) return;
+            phoneChangeTimer.Stop();
+            phoneChangeTimer.Start();
+        }
+
+        // Runs under the same conditions as the detect tick's timed refresh.
+        // Reading everything restarts that count; reading only what the phone
+        // named does not.
         private async Task RefreshAfterPhoneChangeAsync()
         {
             if (IsClosing) return;
             // Coming back reads everything anyway, and a lost connection is the
             // detect tick's to sort out.
-            if (!WindowIsShowing || !lastStateRefreshConnected) return;
+            if (!WindowIsShowing || !lastStateRefreshConnected)
+            {
+                phoneChangeReads.Clear();
+                phoneChangeNeedsAll = false;
+                return;
+            }
             // Something of this app's own is under way. The change is not lost:
             // try again once it is out of the way.
             if (commandBusy || autoDetectRunning || EqualizerEditInFlight())
@@ -2846,10 +2898,37 @@ namespace Xm5ControlUi
                 return;
             }
 
+            bool all = phoneChangeNeedsAll;
+            var reads = new List<string>(phoneChangeReads);
+            phoneChangeReads.Clear();
+            phoneChangeNeedsAll = false;
+
             autoDetectRunning = true;
             try
             {
-                await RefreshCurrentStateQuietAsync(null);
+                if (all)
+                {
+                    await RefreshCurrentStateQuietAsync(null);
+                    return;
+                }
+
+                int writesBefore = settingWriteCount;
+                var output = await RunBackendQuietAsync(WithDevice("batch \"" + string.Join(";", reads) + "\""));
+                if (IsClosing) return;
+                // The gate was held after all: put the reads back for next time.
+                if (output == null)
+                {
+                    foreach (var read in reads) phoneChangeReads.Add(read);
+                    phoneChangeTimer.Start();
+                    return;
+                }
+                if (string.IsNullOrWhiteSpace(output) || output.Contains("Could not open")) return;
+                // A write of this app's own went out meanwhile; its reply has
+                // the newer state.
+                if (settingWriteCount != writesBefore) return;
+                ParseCodec(output);
+                ParseMode(output);
+                ParseExtraSettings(output);
             }
             finally
             {
@@ -3261,10 +3340,9 @@ namespace Xm5ControlUi
             // The Android app says a setting changed there. The earbuds answer
             // most changes only to the app that made them, so without this the
             // window would show it at the next 15 s refresh at the earliest.
-            if (line == "phone: changed")
+            if (line.StartsWith("phone: changed", StringComparison.Ordinal))
             {
-                phoneChangeTimer.Stop();
-                phoneChangeTimer.Start();
+                NotePhoneChange(line.Substring("phone: changed".Length));
                 return;
             }
 
@@ -5011,6 +5089,17 @@ namespace Xm5ControlUi
                 // A scan never touches the control channel, so it cannot say
                 // whether another app still holds it.
                 if (!IsScanCommand(args)) controlInUse = IsControlInUse(output);
+                // The meter stream is stopped while a job runs, and a refresh
+                // through the phone can take several seconds, so the phone's
+                // word that something changed may arrive here instead. Its own
+                // reads may predate the change, so it is read again after.
+                if (output != null)
+                {
+                    foreach (Match changed in Regex.Matches(output, @"(?m)^phone: changed(.*?)\r?$"))
+                    {
+                        NotePhoneChange(changed.Groups[1].Value);
+                    }
+                }
                 return output;
             }
             finally
