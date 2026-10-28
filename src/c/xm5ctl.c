@@ -1042,6 +1042,11 @@ static SOCKET connect_addr(BLUETOOTH_ADDRESS addr, const GUID *service_uuid, int
 /* After the phone could not be reached, go straight to Bluetooth for this long, so a
    phone that is away does not slow every job by PHONE_CONNECT_MS. */
 #define PHONE_SKIP_SECONDS 30
+/* How long to keep trying a phone that was there within PHONE_RECENT_SECONDS, before
+   falling back to Bluetooth; see connect_phone. */
+#define PHONE_RETRY_MS 20000
+#define PHONE_RETRY_GAP_MS 2000
+#define PHONE_RECENT_SECONDS 60
 
 /* The earbuds' address from the phone's last "OK", or empty. */
 static char g_phone_earbuds[32];
@@ -1202,40 +1207,72 @@ static SOCKET phone_handshake(const char *host, const char *kind, const uint8_t 
     return INVALID_SOCKET;
 }
 
-static bool phone_skipped(void) {
+/* A time in seconds kept in a small file next to phone.txt; 0 when there is none. */
+static long long read_phone_time(const char *name) {
     char path[MAX_PATH];
     FILE *f;
-    long long until = 0;
-    if (!phone_file(path, sizeof(path), "phone-skip.txt")) return false;
+    long long t = 0;
+    if (!phone_file(path, sizeof(path), name)) return 0;
     f = fopen(path, "r");
-    if (f == NULL) return false;
-    if (fscanf(f, "%lld", &until) != 1) until = 0;
+    if (f == NULL) return 0;
+    if (fscanf(f, "%lld", &t) != 1) t = 0;
     fclose(f);
-    return (long long)time(NULL) < until;
+    return t;
+}
+
+static void write_phone_time(const char *name, long long t) {
+    char path[MAX_PATH];
+    FILE *f;
+    if (!phone_file(path, sizeof(path), name)) return;
+    f = fopen(path, "w");
+    if (f == NULL) return;
+    fprintf(f, "%lld\n", t);
+    fclose(f);
+}
+
+static bool phone_skipped(void) {
+    return (long long)time(NULL) < read_phone_time("phone-skip.txt");
 }
 
 static void skip_phone(void) {
-    char path[MAX_PATH];
-    FILE *f;
-    if (!phone_file(path, sizeof(path), "phone-skip.txt")) return;
-    f = fopen(path, "w");
-    if (f == NULL) return;
-    fprintf(f, "%lld\n", (long long)time(NULL) + PHONE_SKIP_SECONDS);
-    fclose(f);
+    write_phone_time("phone-skip.txt", (long long)time(NULL) + PHONE_SKIP_SECONDS);
+}
+
+/* Called as a job through the phone ends, however it ends. When the phone app
+   restarts (an update, Android ending it), the job running through it - usually the
+   tray meter's stream - ends, and the next one starts within seconds. */
+static void note_phone_seen(void) {
+    write_phone_time("phone-seen.txt", (long long)time(NULL));
 }
 
 /* Through the phone when paired and not skipped; INVALID_SOCKET means use Bluetooth.
    The phone may connect to the earbuds itself before answering, so the handshake
-   waits as long as an RFCOMM connect. */
+   waits as long as an RFCOMM connect.
+
+   Falling back while the phone holds the earbuds takes them from it, and it takes
+   them back: the two then pull them back and forth until the phone pauses itself. So
+   a phone that was there moments ago (PHONE_RECENT_SECONDS) is retried for up to
+   PHONE_RETRY_MS first. Restarting, it stops listening for about 10 s. A phone
+   that is really gone costs that wait once or twice, then the skip takes over. */
 static SOCKET connect_phone(int connect_timeout_ms) {
     char host[256];
     uint8_t key[32];
     phone_result_t result;
     SOCKET s;
+    bool recent;
+    DWORD start = GetTickCount();
 
     if (g_direct || !load_phone(host, sizeof(host), key) || phone_skipped()) return INVALID_SOCKET;
-    s = phone_handshake(host, "AUTH", key, sizeof(key), connect_timeout_ms, NULL, &result);
-    if (result == PHONE_OK) return s;
+    recent = (long long)time(NULL) - read_phone_time("phone-seen.txt") < PHONE_RECENT_SECONDS;
+    for (;;) {
+        s = phone_handshake(host, "AUTH", key, sizeof(key), connect_timeout_ms, NULL, &result);
+        if (result == PHONE_OK) {
+            note_phone_seen();
+            return s;
+        }
+        if (!recent || result == PHONE_REFUSED || (int)(GetTickCount() - start) >= PHONE_RETRY_MS) break;
+        Sleep(PHONE_RETRY_GAP_MS);
+    }
     /* Whatever the reason, Bluetooth next. When the phone has no earbuds it has
        already tried to connect to them and failed, so they are free; once it reaches
        them again it takes them back, and the next job here goes through it. */
@@ -2202,6 +2239,7 @@ int main(int argc, char **argv) {
         rc = 2;
     }
 
+    if (g_via_phone) note_phone_seen();
     WSACleanup();
     return rc;
 }
